@@ -119,14 +119,73 @@ History of Binance → BNC transfer rates.
 
 ---
 
-## 🧪 Testing Workflow (Spec-First TDD)
+## 🧪 Spec-Driven Development Workflow
 
-1. Write specs first (red)
-2. Implement until tests pass (green)
-3. Refactor
-4. Commit: `test: ...` then `feat: ...`
+This project follows a **spec-first TDD** cycle. The agent MUST follow this order
+for every module — no exceptions.
 
-See [`.agents/rules.md`](./rules.md) for full conventions.
+### The Cycle
+
+```
+1. READ   → understand the module's contract from the plan
+2. SPEC   → write all tests first (they must fail)
+3. VERIFY → run pytest, confirm all new tests are RED
+4. BUILD  → implement the module until all tests are GREEN
+5. COMMIT → two separate commits (test first, then feat)
+6. REFACTOR (optional) → clean up, commit as refactor
+```
+
+### Step-by-Step Agent Behavior
+
+**Step 1 — Write specs first**
+- Create `tests/test_<module>.py` with all cases grouped by class.
+- Cover: happy path, edge cases, and error cases.
+- Do NOT write any implementation code yet.
+
+**Step 2 — Confirm tests fail (red)**
+```bash
+pytest tests/test_<module>.py -v
+# Expected: all new tests FAIL with ImportError or AssertionError
+```
+
+**Step 3 — Commit the failing tests**
+```bash
+git add tests/test_<module>.py
+git commit -m "test: add <module> specs"
+```
+
+**Step 4 — Implement the module**
+- Write only enough code to make the tests pass.
+- No gold-plating. No features not covered by a test.
+
+**Step 5 — Confirm tests pass (green)**
+```bash
+pytest tests/ -v
+# Expected: all tests PASS, including previous ones (no regressions)
+```
+
+**Step 6 — Commit the implementation**
+```bash
+git add importer/<module>.py
+git commit -m "feat: implement <module>"
+git push
+```
+
+### Module Implementation Order
+
+Follow this sequence — each module depends on the previous:
+
+| # | Module | Depends on |
+|---|---|---|
+| 1 | `db.py` | nothing |
+| 2 | `parser.py` | nothing |
+| 3 | `classifier.py` | `db.py`, `parser.py` |
+| 4 | `converter.py` | nothing |
+| 5 | `rounder.py` | nothing |
+| 6 | `main.py` | all above |
+| 7 | `web_automator.py` | `main.py` |
+
+See [`.agents/rules.md`](./rules.md) for pytest conventions and fixture patterns.
 
 ---
 

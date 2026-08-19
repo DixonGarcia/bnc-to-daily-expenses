@@ -151,13 +151,53 @@ Types:
 | `chore` | Tooling, config, deps |
 | `docs` | README, AGENTS.md, comments |
 
-### Branch naming
-Not required for this project (solo development, commit directly to `main`).
+### Branch + PR Workflow
 
-### Commit order for TDD workflow
-1. `test: add <module> specs` — commit the failing tests first
-2. `feat: implement <module>` — commit the passing implementation
-3. `refactor: <what changed>` — optional cleanup commit
+Every module follows this branch lifecycle:
+
+```
+main
+ └── module/<name>        ← agent works here
+      ├── commit: docs: add _product/<name>.md spec
+      ├── commit: test: add <name> specs          ← RED
+      └── commit: feat: implement <name>          ← GREEN
+           └── Pull Request → reviewed by user → merge to main
+```
+
+**Branch naming**: `module/<module-name>`
+Examples: `module/db`, `module/parser`, `module/classifier`
+
+**Step-by-step:**
+
+```bash
+# 1. Always branch from a fresh main
+git checkout main && git pull
+git checkout -b module/<name>
+
+# 2. Write spec doc + tests, commit as RED
+git add _product/<name>.md tests/test_<name>.py
+git commit -m "test: add <name> specs"
+git push -u origin module/<name>
+
+# 3. Open PR immediately (draft) so user can track progress
+gh pr create --draft --title "module: <name>" --body "Spec and tests for <name> module."
+
+# 4. Implement until GREEN, commit
+git add importer/<name>.py
+git commit -m "feat: implement <name>"
+git push
+
+# 5. Mark PR as ready for review
+gh pr ready
+
+# 6. User reviews, approves, and merges via GitHub UI
+```
+
+### Commit order within a module branch
+1. `docs: add _product/<name>.md spec`
+2. `test: add <name> specs` — failing tests (RED)
+3. `feat: implement <name>` — passing implementation (GREEN)
+4. `refactor: <what changed>` — optional cleanup
 
 ---
 
