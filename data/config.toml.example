@@ -1,0 +1,19 @@
+# Copy this file to config.toml and fill in your values.
+# config.toml is gitignored — never commit your real credentials.
+
+[app]
+url = "https://dailyexpenses4.com/home"
+
+# Cookies file path (generated automatically on first login)
+cookies_file = "data/session_cookies.json"
+
+# Accounts as they appear in Daily Expenses 4
+# Add as many accounts as you have in the app
+[[accounts]]
+name = "Binance"      # exact name in the app
+currency = "USD"
+
+# Future accounts can be added here:
+# [[accounts]]
+# name = "Efectivo"
+# currency = "USD"
