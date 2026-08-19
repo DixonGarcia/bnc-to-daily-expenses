@@ -1,0 +1,36 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Project data — never commit sensitive files
+data/importer.db
+data/session_cookies.json
+tmp/
+ML*.txt
+*.csv
+
+# Config with credentials — use config.toml.example instead
+data/config.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
