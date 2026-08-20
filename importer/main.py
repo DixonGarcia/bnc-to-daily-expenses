@@ -307,10 +307,10 @@ def run(input_path: Path, dry_run: bool = False) -> None:
     db = Database(_DB_PATH)
     config = _load_config()
 
-    # 1. Parse
+    # 1. Parse & sort chronologically (oldest to newest)
     content = input_path.read_text(encoding="utf-8")
-    all_transactions = parse(content)
-    console.print(f"\n📄 Parsed [bold]{len(all_transactions)}[/bold] transactions from {input_path.name}")
+    all_transactions = sorted(parse(content), key=lambda tx: (tx.date, tx.time))
+    console.print(f"\n📄 Parsed [bold]{len(all_transactions)}[/bold] transactions from {input_path.name} (chronological order)")
 
     # 2. Deduplicate
     new_transactions = [tx for tx in all_transactions if not db.is_processed(_tx_key(tx))]
