@@ -93,7 +93,7 @@ def parse(content: str) -> list[BNCTransaction]:
             continue
 
         credit = _to_decimal(raw_credit)
-        if credit > 0 and any(sub in tx_type for sub in _IGNORED_CREDIT_TYPES):
+        if credit > 0 and tx_type != "Credito Inmediato Recibido":
             continue
 
         debit_raw = _to_decimal(raw_debit)
