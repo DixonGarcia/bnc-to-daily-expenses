@@ -178,3 +178,29 @@ class TestParse:
 
         def test_commission_row_is_filtered(self, commission_row):
             assert parse(commission_row) == []
+
+        def test_filters_out_transferencias_recibidas(self):
+            content = (
+                "01910253022100010934@GARCIA DIAZ DIXON EFRAIN@25 ULTIMOS MOVIMIENTOS\r\n"
+                "\r\n"
+                "Fecha\tHora\tReferencia\tCod. Transacción\tTipo Transacción\tTip. Operación\t"
+                "Descripción\tDebe\tHaber\tSaldo\tReferencia 2\r\n"
+                "13/07/2026\t18:25:52.143\t182552143\t262\tABONO\tTranf. entre Ctas. Internet\t"
+                "TRANSFERENCIA RECIBIDA DEL BCO. NACIONAL DE CREDITO\t0\t83464\t89260,62\t19357345\r\n"
+            )
+            assert parse(content) == []
+
+        def test_keeps_pago_servicios(self):
+            content = (
+                "01910253022100010934@GARCIA DIAZ DIXON EFRAIN@25 ULTIMOS MOVIMIENTOS\r\n"
+                "\r\n"
+                "Fecha\tHora\tReferencia\tCod. Transacción\tTipo Transacción\tTip. Operación\t"
+                "Descripción\tDebe\tHaber\tSaldo\tReferencia 2\r\n"
+                "13/07/2026\t11:00:32.375\t4144967314\t642\tCARGO\tPago MOVISTAR BNCNet\t"
+                "RECARGA / PAGO MOVISTAR : 04144967314\t-2600\t0\t36469,23\t4144967314\r\n"
+            )
+            result = parse(content)
+            assert len(result) == 1
+            assert result[0].tx_type == "Pago MOVISTAR BNCNet"
+            assert result[0].debit == Decimal("2600")
+

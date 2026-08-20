@@ -72,6 +72,13 @@ class TestClassify:
                 result = classify(tx, db)
                 assert result.description == "Farmacia Ignacio"
 
+            def test_works_for_pago_servicios(self, db):
+                db.add_rule("MOVISTAR", "Hogar", "Movistar")
+                tx = make_tx("Pago MOVISTAR BNCNet", "RECARGA / PAGO MOVISTAR : 04144967314", debit="2600")
+                result = classify(tx, db)
+                assert result.category == "Hogar"
+                assert result.description == "Movistar"
+
         class AndNoRuleMatches:
             def test_returns_none(self, db):
                 tx = make_tx("Compra de POS DebitMC", "UNKNOWN MERCHANT XYZ")
@@ -81,6 +88,11 @@ class TestClassify:
             def test_returns_none_even_with_other_rules_in_db(self, db):
                 db.add_rule("KEYLA PATRICIA", "Comida", "Charcutería")
                 tx = make_tx("Compra de POS DebitMC", "MULTIMARCAS 2022 C A SAN CARLOS")
+                result = classify(tx, db)
+                assert result is None
+
+            def test_unknown_service_payment_returns_none(self, db):
+                tx = make_tx("Pago MOVISTAR BNCNet", "RECARGA / PAGO MOVISTAR : 04144967314", debit="2600")
                 result = classify(tx, db)
                 assert result is None
 

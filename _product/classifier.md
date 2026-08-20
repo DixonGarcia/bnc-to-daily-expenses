@@ -26,9 +26,7 @@ Its main job is:
 ## Transaction Categories
 
 ### Expense transactions — classify against merchant rules
-- `"Compra de POS DebitMC"`
-- `"Cargo Pago Movil BNC"`
-- `"Retiro de Biopago"`
+- Any transaction with `debit > 0` (e.g. `"Compra de POS DebitMC"`, `"Cargo Pago Movil BNC"`, `"Retiro de Biopago"`, `"Pago MOVISTAR BNCNet"`, etc.)
 
 ### Prompt transactions — returned with `requires_prompt=True`
 - `"Credito Inmediato Recibido"` — may be a Binance → BNC funding event
