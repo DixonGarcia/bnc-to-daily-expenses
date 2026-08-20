@@ -123,7 +123,7 @@ def _handle_unknown_merchant(tx, rate: Decimal, db: Database) -> tuple[str, str]
 
     if save:
         # Use first significant word cluster as pattern
-        pattern = tx.description[:30].strip()
+        pattern = tx.description[:20].strip()
         try:
             db.add_rule(pattern, category, description)
             console.print(f"[green]✅ Rule saved:[/green] '{pattern}' → {category} / {description}")
