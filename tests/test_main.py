@@ -34,7 +34,6 @@ def make_sample_tx(
         debit=Decimal(debit),
         credit=Decimal(credit),
         balance=Decimal("50000"),
-        ref2="",
     )
 
 

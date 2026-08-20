@@ -134,7 +134,6 @@ class TestClassify:
                 debit=Decimal("0"),
                 credit=Decimal("45700"),
                 balance=Decimal("89987.42"),
-                ref2="",
             )
             result = classify(tx, db)
             assert result is not None
@@ -151,7 +150,6 @@ class TestClassify:
                 debit=Decimal("0"),
                 credit=Decimal("83464"),
                 balance=Decimal("89260.62"),
-                ref2="",
             )
             result = classify(tx, db)
             assert result is not None
@@ -168,7 +166,6 @@ class TestClassify:
                 debit=Decimal("0"),
                 credit=Decimal("15000"),
                 balance=Decimal("65000"),
-                ref2="",
             )
             result = classify(tx, db)
             assert result is not None
