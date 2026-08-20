@@ -29,7 +29,7 @@ Its main job is:
 - Any transaction with `debit > 0` (e.g. `"Compra de POS DebitMC"`, `"Cargo Pago Movil BNC"`, `"Retiro de Biopago"`, `"Pago MOVISTAR BNCNet"`, etc.)
 
 ### Prompt transactions — returned with `requires_prompt=True`
-- `"Credito Inmediato Recibido"` — may be a Binance → BNC funding event
+- Any transaction with `credit > 0` (e.g. `"Credito Inmediato Recibido"`, `"Abono Pago Movil"`, `"Tranf. entre Ctas. Internet"`) — may be a Binance → BNC funding event
 - `"Crédito Inmediato Emitido"` — outgoing transfer, user decides
 
 ### All other types — should never reach the classifier (already filtered by parser)

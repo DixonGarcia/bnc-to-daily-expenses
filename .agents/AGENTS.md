@@ -77,13 +77,13 @@ Tracks every imported transaction to prevent duplicates.
 | `description` | TEXT | Description as loaded into the app |
 
 ### `exchange_rates`
-History of Binance → BNC transfer rates.
+History of Binance → BNC transfer rates with their effective transaction dates.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PK | |
 | `rate` | REAL | e.g. 845.88 (Bs per USD) |
-| `registered_at` | TEXT | ISO datetime |
+| `registered_at` | TEXT | ISO date/datetime (e.g. "2026-07-24" based on transaction date) |
 | `notes` | TEXT | Free text, e.g. "100 USDT → BNC" |
 
 ---
@@ -92,29 +92,31 @@ History of Binance → BNC transfer rates.
 
 ### Transactions to IGNORE (filtered in `parser.py`)
 - `tx_type` contains `"Comisión"` — bank commissions (< $0.02, noise)
-- `credit > 0` and `tx_type` contains `"Abono"` — incoming transfers
 - `tx_type` == `"Saldo Inicial"` — balance header row
 - `tx_type` contains `"Comisión Credito Inmediato"` — transfer commission
 
 ### Transactions that trigger an INTERACTIVE PROMPT
-- `Credito Inmediato Recibido` — may be a Binance → BNC funding event.
-  Ask: "Register new exchange rate? / Ignore?"
+- Any incoming credit (`credit > 0`, e.g. `Credito Inmediato Recibido`, `Abono Pago Movil`, `Transferencia Recibida`) — user decides if it represents a new Binance → BNC funding rate or should be omitted.
 - `Crédito Inmediato Emitido` — outgoing transfer.
-  Ask: "What is this? / Ignore?"
-- Any debit with no matching merchant rule — ask for category + description + save rule?
+- Any debit with no matching merchant rule — interactive category selection (from the 21 app categories) + description + save rule option.
+- Existing merchant rules are presented as **editable suggestions** (Accept with Enter, or edit).
 
 ### Transactions to PROCESS as expenses
 - `Compra de POS DebitMC`
 - `Cargo Pago Movil BNC`
 - `Retiro de Biopago`
+- `Pago MOVISTAR BNCNet` (and any debited service payment)
 
 ---
 
-## 💱 Currency Conversion & Rounding
+## 💱 Currency Conversion, Rates & Rounding
 
-- **Conversion**: `amount_usd = amount_bsf / active_rate` (last registered exchange rate)
+- **Chronological Sorting**: Transactions are sorted from oldest to newest prior to processing.
+- **Dynamic Rates**: If a new rate is registered on a transfer, it takes effect from that transaction forward for all subsequent expenses in the statement.
+- **Historical Rate Date**: Exchange rates record the actual transaction date (e.g. `24/07/2026`), not the current system clock time.
+- **Conversion**: `amount_usd = amount_bsf / active_rate` (rate active at that specific transaction step).
 - **Rounding**: `ROUND_HALF_UP` with accumulative residual.
-  - Residual carries over to the next transaction in the same import session.
+  - Residual carries over to the next transaction in chronological sequence.
   - e.g. $9.73 → $10 (residual: -0.27), next $9.20 → effective $8.93 → $9
 
 ---

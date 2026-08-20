@@ -122,3 +122,54 @@ class TestClassify:
             tx = make_tx("Credito Inmediato Recibido")
             result = classify(tx, db)
             assert result.tx is tx
+
+        def test_abono_pago_movil_requires_prompt(self, db):
+            tx = BNCTransaction(
+                date=date(2026, 8, 19),
+                time="11:32:33",
+                reference="1444713301",
+                tx_type="Abono Pago Movil BNC",
+                op_type="P2POTR",
+                description="PAGO MOVIL RECIBIDO",
+                debit=Decimal("0"),
+                credit=Decimal("45700"),
+                balance=Decimal("89987.42"),
+                ref2="",
+            )
+            result = classify(tx, db)
+            assert result is not None
+            assert result.requires_prompt is True
+
+        def test_transferencia_recibida_requires_prompt(self, db):
+            tx = BNCTransaction(
+                date=date(2026, 7, 13),
+                time="18:25:52",
+                reference="182552143",
+                tx_type="Tranf. entre Ctas. Internet",
+                op_type="ABONO",
+                description="TRANSFERENCIA RECIBIDA DEL BCO. NACIONAL DE CREDITO",
+                debit=Decimal("0"),
+                credit=Decimal("83464"),
+                balance=Decimal("89260.62"),
+                ref2="",
+            )
+            result = classify(tx, db)
+            assert result is not None
+            assert result.requires_prompt is True
+
+        def test_any_positive_credit_requires_prompt(self, db):
+            tx = BNCTransaction(
+                date=date(2026, 7, 20),
+                time="10:00:00",
+                reference="999888",
+                tx_type="Otro Ingreso",
+                op_type="",
+                description="ABONO ESPECIAL",
+                debit=Decimal("0"),
+                credit=Decimal("15000"),
+                balance=Decimal("65000"),
+                ref2="",
+            )
+            result = classify(tx, db)
+            assert result is not None
+            assert result.requires_prompt is True

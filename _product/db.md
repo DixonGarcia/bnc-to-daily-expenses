@@ -138,13 +138,13 @@ Raises `ValueError` if `reference` was already processed.
 ```python
 def get_active_rate(self) -> ExchangeRate | None
 ```
-Returns the most recently registered exchange rate, or `None` if none exists yet.
+Returns the most recently registered `ExchangeRate`, or `None` if no rates exist.
 
 ```python
-def add_rate(self, rate: float, notes: str = "") -> ExchangeRate
+def add_rate(self, rate: float, notes: str = "", registered_at: str | None = None) -> ExchangeRate
 ```
-Inserts a new rate record with the current UTC datetime.
-Raises `ValueError` if `rate` is zero or negative.
+Inserts a new exchange rate. `registered_at` is an optional ISO date/datetime string (defaults to current UTC timestamp).
+Raises `ValueError` if `rate <= 0`.
 
 ---
 
