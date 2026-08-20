@@ -3,21 +3,11 @@
 Uses Playwright to simulate user interaction with the Angular SPA at
 https://dailyexpenses4.com.
 
-Authentication strategy:
-  - First run: a headed browser window opens. The user logs in manually
-    with Google. Full storage state (cookies + localStorage) is saved to
-    data/session_cookies.json (gitignored) for future headless runs.
-  - Subsequent runs: headless, session restored via storage_state.
-
-UI Elements (supports both Spanish and English UI):
-  - Nav: Movimientos / Movements
-  - FAB: '+' button
-  - Amount: spinbutton input
-  - Account button -> dropdown list -> account name
-  - Category button -> dropdown list -> category name
-  - Description: textarea
-  - Date: date picker -> confirm
-  - Save button: Guardar / Save
+Angular Components:
+  - Account picker:  <app-selector-account>
+  - Category picker: <app-selector-category>
+  - Date picker:     <app-date-time-picker>
+  - Save button:     button.save-movement-button
 """
 from __future__ import annotations
 
@@ -35,22 +25,6 @@ console = Console()
 APP_URL = "https://dailyexpenses4.com/home"
 MODAL_ID = "#ModalAddMovements"
 
-_MONTH_NAMES_ES = {
-    1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
-    5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
-    9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
-}
-
-_MONTH_NAMES_EN = {
-    1: "January", 2: "February", 3: "March", 4: "April",
-    5: "May", 6: "June", 7: "July", 8: "August",
-    9: "September", 10: "October", 11: "November", 12: "December",
-}
-
-
-# ---------------------------------------------------------------------------
-# Session management (cookies + localStorage via Playwright storage_state)
-# ---------------------------------------------------------------------------
 
 def _session_file_path(config: dict) -> Path:
     return Path(config["app"].get("cookies_file", "data/session_cookies.json"))
@@ -100,7 +74,6 @@ def get_authenticated_context(playwright_instance, session_file: Path) -> tuple[
     """Return (browser, context) with an active authenticated session."""
     if session_file.exists():
         try:
-            # Check if file has valid JSON
             content = session_file.read_text(encoding="utf-8").strip()
             if content and content != "[]":
                 browser = playwright_instance.chromium.launch(headless=True)
@@ -149,98 +122,58 @@ def load_expense(
     modal.wait_for(state="visible", timeout=8_000)
 
     # 3. Amount input
-    amount_field = modal.locator("input[type='number'], [role='spinbutton']").first
+    amount_field = modal.locator("input.quantity, input[type='number']").first
     amount_field.click()
     amount_field.fill(str(amount_usd))
 
-    # 4. Account selector
-    _select_account(page, modal, account)
+    # 4. Account selector via <app-selector-account>
+    modal.locator("app-selector-account button").click()
+    page.wait_for_timeout(300)
+    account_item = modal.locator("app-selector-account .dropdown-menu .item-list").filter(has_text=account).first
+    if account_item.count() > 0:
+        account_item.click()
+    else:
+        # Fallback to text inside modal
+        modal.get_by_text(account, exact=True).first.click()
+    page.wait_for_timeout(300)
 
-    # 5. Category selector
-    _select_category(page, modal, category)
+    # 5. Category selector via <app-selector-category>
+    modal.locator("app-selector-category button").click()
+    page.wait_for_timeout(300)
+    category_item = modal.locator("app-selector-category .dropdown-menu .item-list").filter(has_text=category).first
+    if category_item.count() > 0:
+        category_item.click()
+    else:
+        modal.get_by_text(category, exact=True).first.click()
+    page.wait_for_timeout(300)
 
     # 6. Description
     modal.locator("textarea").fill(description)
 
-    # 7. Date picker
-    _set_date(page, modal, expense_date)
-
-    # 8. Save button (Guardar / Save)
-    save_btn = modal.get_by_role("button", name=re.compile(r"Guardar|Save", re.IGNORECASE))
-    save_btn.click()
-    page.wait_for_load_state("networkidle")
-    sleep(0.8)
-
-
-def _select_account(page: Page, modal, account: str) -> None:
-    """Open the account dropdown and select the account by name."""
-    # The account button is located right after the amount input, before the category button
-    # In DOM, it's typically the first dropdown button in the form body
-    account_btn = modal.locator(".dropdown-toggle, button.btn-account, .col-12 button, button").filter(
-        has_not_text=re.compile(r"Gastos|Ingresos|Transferencia|Guardar|Save|Cancel|Elige|Choose", re.IGNORECASE)
-    ).first
-    
-    account_btn.click()
-    page.wait_for_timeout(300)
-
-    # Select the account option from the dropdown menu
-    dropdown = page.locator(".dropdown-menu, .size-menu, #ModalAddMovements .dropdown-menu")
-    option = dropdown.get_by_text(account, exact=True).first
-    if option.count() == 0:
-        # Fallback to general text match inside modal
-        option = modal.get_by_text(account, exact=True).first
-    
-    option.click()
-    page.wait_for_timeout(300)
-
-
-def _select_category(page: Page, modal, category: str) -> None:
-    """Open the category dropdown and select the category by name."""
-    category_btn = modal.get_by_role(
-        "button", name=re.compile(r"Elige una categoría|Choose a category|Categoría|Category", re.IGNORECASE)
-    )
-    if category_btn.count() == 0:
-        # If a category was already selected or button has different text
-        category_btn = modal.locator("button").filter(
-            has=page.locator("i.fa-question-circle, i.bi-question-circle, img")
-        ).first
-
-    category_btn.click()
-    page.wait_for_timeout(300)
-
-    # Click the category item
-    dropdown = page.locator(".dropdown-menu, .size-menu, #ModalAddMovements")
-    dropdown.get_by_text(category, exact=True).first.click()
-    page.wait_for_timeout(300)
-
-
-def _set_date(page: Page, modal, expense_date: date) -> None:
-    """Open the date picker, select day, and confirm."""
-    # Date button contains date format dd/mmm/yyyy or dd/mm/yyyy
-    date_btn = modal.get_by_role("button", name=re.compile(r"\d+/\w+/\d{4}|\w+/\d{4}"))
-    if date_btn.count() == 0:
-        date_btn = modal.locator("button").filter(has_text=re.compile(r"/\d{4}"))
-
+    # 7. Date picker via <app-date-time-picker>
+    date_btn = modal.locator("app-date-time-picker button.btn")
     if date_btn.count() > 0:
         date_btn.first.click()
         page.wait_for_timeout(300)
 
-        # Select the day in calendar
-        month_es = _MONTH_NAMES_ES[expense_date.month]
-        month_en = _MONTH_NAMES_EN[expense_date.month]
-        
-        day_btn = page.get_by_role("button", name=re.compile(
-            rf"({month_es}|{month_en})\s+{expense_date.day}[,\s]", re.IGNORECASE
-        ))
-        
-        if day_btn.count() > 0:
-            day_btn.first.click()
+        # Select the day number in calendar
+        day_cell = page.locator("mat-calendar button.mat-calendar-body-cell").filter(
+            has_text=re.compile(rf"^\s*{expense_date.day}\s*$")
+        ).first
+        if day_cell.count() > 0:
+            day_cell.click()
+            page.wait_for_timeout(200)
 
-        # Confirm date dialog (Ok / Aceptar)
-        ok_btn = page.get_by_role("button", name=re.compile(r"Ok|Aceptar", re.IGNORECASE))
+        # Confirm date
+        ok_btn = page.locator("app-date-time-picker button").filter(has_text=re.compile(r"Ok|Aceptar", re.IGNORECASE))
         if ok_btn.count() > 0:
             ok_btn.first.click()
             page.wait_for_timeout(200)
+
+    # 8. Save button
+    modal.locator("button.save-movement-button").click()
+    page.wait_for_load_state("networkidle")
+    sleep(0.8)
 
 
 # ---------------------------------------------------------------------------
