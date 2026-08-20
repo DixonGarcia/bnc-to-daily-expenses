@@ -1,10 +1,12 @@
 """CLI entry point for the BNC to Daily Expenses importer.
 
 Orchestrates the full import pipeline:
-  1. Parse the BNC statement file
+  1. Parse the BNC statement file & sort chronologically
   2. Filter already-processed transactions (deduplication)
-  3. Prompt for exchange rate
+  3. Prompt for initial exchange rate (displaying exact registered transaction date)
   4. Classify each transaction (rules DB or interactive prompt)
+     - Any income / credit prompts if it defines a new rate or should be omitted
+     - Dynamic rate changes update conversion rate for all following expenses
      - Rules are presented as suggestions (can accept or edit)
      - Visual separation lines between transaction output and choices
      - Interactive undo (go back to previous transaction)
@@ -19,6 +21,7 @@ from __future__ import annotations
 import argparse
 import sys
 import tomllib
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -78,67 +81,89 @@ def _tx_key(tx) -> str:
     return tx.reference if tx.reference else f"{tx.date}_{tx.time}_{tx.debit}_{tx.description[:25]}"
 
 
-def _resolve_rate(db: Database) -> Decimal:
+def _format_date(iso_date_str: str) -> str:
+    """Format an ISO date or datetime string as DD/MM/YYYY."""
+    raw = iso_date_str[:10]
+    try:
+        d = date.fromisoformat(raw)
+        return d.strftime("%d/%m/%Y")
+    except ValueError:
+        return raw
+
+
+def _resolve_rate(db: Database, initial_date: date | None = None) -> Decimal:
     """Ask the user whether to use the current rate or register a new one."""
     active = db.get_active_rate()
 
     if active:
+        date_display = _format_date(active.registered_at)
         use_existing = questionary.confirm(
-            f"Active exchange rate: {active.rate} Bs/USD "
-            f"(registered {active.registered_at[:10]}). Use it?",
+            f"Tasa activa: {active.rate} Bs/USD (del {date_display}). ¿Usarla?",
             default=True,
         ).ask()
         if use_existing:
             return Decimal(str(active.rate))
 
     rate_str = questionary.text(
-        "Enter new exchange rate (Bs per USD, e.g. 845.88):"
+        "Ingresa la tasa de cambio inicial (Bs por USD, ej: 818.80):"
     ).ask()
-    notes = questionary.text("Notes (optional, e.g. '100 USDT → BNC'):").ask() or ""
+    notes = questionary.text("Notas (opcional, ej: '100 USDT → BNC'):").ask() or ""
     rate = Decimal(rate_str.replace(",", "."))
-    db.add_rate(float(rate), notes=notes)
-    console.print(f"[green]✅ Rate saved:[/green] {rate} Bs/USD")
+    
+    rate_date = initial_date.isoformat() if initial_date else datetime.now(timezone.utc).date().isoformat()
+    db.add_rate(float(rate), notes=notes, registered_at=rate_date)
+    console.print(f"[green]✅ Tasa guardada:[/green] {rate} Bs/USD (fecha: {_format_date(rate_date)})")
     return rate
 
 
-def _handle_prompt_transaction(tx, db: Database, can_go_back: bool = False) -> str:
-    """Ask the user what to do with a special transaction (e.g. Credito Inmediato).
+def _handle_income_or_prompt_transaction(
+    tx, db: Database, can_go_back: bool = False
+) -> tuple[str, Decimal | None]:
+    """Ask the user what to do with an incoming credit / transfer.
 
-    Returns 'rate', 'skip', 'back', or 'exit'.
+    Returns (action, new_rate):
+      action: 'rate', 'skip', 'back', or 'exit'
+      new_rate: Decimal rate if action == 'rate', else None
     """
     console.print("\n" + "=" * 80)
-    console.print(f"[bold cyan]Transacción Especial[/bold cyan] — [bold]{tx.date.strftime('%d/%m/%Y')} {tx.time}[/bold]")
+    console.print(f"[bold cyan]Ingreso detectado[/bold cyan] — [bold]{tx.date.strftime('%d/%m/%Y')} {tx.time}[/bold]")
     console.print(f"  [dim]Tipo:[/dim] {tx.tx_type}")
     console.print(f"  [dim]Descripción:[/dim] [white]{tx.description}[/white]")
-    console.print(f"  [dim]Monto:[/dim] [bold yellow]{'+' if tx.credit else '-'}{tx.credit or tx.debit:,.2f} Bs[/bold yellow]")
+    if tx.credit > 0:
+        console.print(f"  [dim]Monto abonado:[/dim] [bold green]+{tx.credit:,.2f} Bs[/bold green]")
+    else:
+        console.print(f"  [dim]Monto débito:[/dim] [bold yellow]-{tx.debit:,.2f} Bs[/bold yellow]")
     console.print("=" * 80)
 
     choices = [
-        "Registrar nueva tasa de cambio (Binance → BNC)",
-        "⏭️  Ignorar esta transacción",
+        "💱 Sí, registrar nueva tasa de cambio (Binance → BNC)",
+        "⏭️  No, omitir este ingreso",
     ]
     if can_go_back:
         choices.append("⬅️  Volver a la transacción anterior")
     choices.append("❌ Salir / Cancelar")
 
     action = questionary.select(
-        "¿Qué deseas hacer con este movimiento?",
+        "¿Este ingreso representa un fondeo con nueva tasa de cambio?",
         choices=choices,
     ).ask()
 
     if action == "⬅️  Volver a la transacción anterior":
-        return "back"
+        return "back", None
     if action == "❌ Salir / Cancelar":
-        return "exit"
-    if action == "⏭️  Ignorar esta transacción":
-        return "skip"
+        return "exit", None
+    if "No, omitir" in action:
+        return "skip", None
 
-    rate_str = questionary.text("Tasa de cambio para esta transferencia (Bs por USD):").ask()
+    rate_str = questionary.text("Tasa de cambio para este ingreso (Bs por USD, ej: 818.80):").ask()
     notes = questionary.text("Notas (opcional, ej: '100 USDT → BNC'):").ask() or ""
     rate = Decimal(rate_str.replace(",", "."))
-    db.add_rate(float(rate), notes=notes)
-    console.print(f"[green]✅ Tasa guardada:[/green] {rate} Bs/USD")
-    return "rate"
+    
+    # Save rate with the transaction's actual date (e.g. "2026-07-24")
+    tx_date_str = tx.date.isoformat()
+    db.add_rate(float(rate), notes=notes, registered_at=tx_date_str)
+    console.print(f"[green]✅ Nueva tasa activa guardada:[/green] {rate} Bs/USD (fecha efectiva: {tx.date.strftime('%d/%m/%Y')})")
+    return "rate", rate
 
 
 def _handle_transaction_classification(
@@ -161,7 +186,7 @@ def _handle_transaction_classification(
     console.print(f"[bold cyan]Transacción[/bold cyan] — [bold]{tx.date.strftime('%d/%m/%Y')} {tx.time}[/bold]")
     console.print(f"  [dim]Tipo:[/dim] {tx.tx_type}")
     console.print(f"  [dim]Descripción BNC:[/dim] [white]{tx.description}[/white]")
-    console.print(f"  [dim]Monto:[/dim] [bold yellow]Bs {tx.debit:,.2f}[/bold yellow]  →  [bold green]~${usd:.2f} USD[/bold green]")
+    console.print(f"  [dim]Monto:[/dim] [bold yellow]Bs {tx.debit:,.2f}[/bold yellow]  →  [bold green]~${usd:.2f} USD[/bold green] [dim]@{rate} Bs/$[/dim]")
     console.print("=" * 80)
 
     if suggested_rule:
@@ -276,6 +301,7 @@ def _print_summary(records: list[dict]) -> None:
     table.add_column("Description", style="white")
     table.add_column("Category", style="green")
     table.add_column("Bs", justify="right")
+    table.add_column("Rate", justify="right", style="dim")
     table.add_column("USD (exact)", justify="right", style="yellow")
     table.add_column("Rounded $", justify="right", style="bold green")
 
@@ -286,6 +312,7 @@ def _print_summary(records: list[dict]) -> None:
             r["description"],
             r["category"],
             f"{r['debit']:,.2f}",
+            f"{r['rate']}",
             f"${r['usd_exact']:.2f}",
             f"${r['usd_rounded']}",
         )
@@ -322,27 +349,33 @@ def run(input_path: Path, dry_run: bool = False) -> None:
         console.print("[green]✅ Nothing new to import.[/green]")
         return
 
-    # 3. Exchange rate
+    # 3. Exchange rate (use first transaction date as default context date)
     console.print()
-    rate = _resolve_rate(db)
+    first_tx_date = new_transactions[0].date if new_transactions else None
+    current_rate = _resolve_rate(db, initial_date=first_tx_date)
 
     # 4. Interactive classification loop with suggestions, Undo/Back, and Exit options
     categories = config.get("categories", DEFAULT_CATEGORIES)
     step_results: dict[int, dict | None] = {}  # idx -> classified dict or None (skipped)
+    step_rates: dict[int, Decimal] = {}        # idx -> rate active at this step
     idx = 0
 
     try:
         while idx < len(new_transactions):
             tx = new_transactions[idx]
+            step_rates[idx] = current_rate
             console.print(f"\n[dim]Transacción [{idx + 1}/{len(new_transactions)}][/dim]")
 
-            # Check if this is a special prompt transaction (funding/transfer)
-            if tx.tx_type in {"Credito Inmediato Recibido", "Crédito Inmediato Emitido"}:
-                prompt_action = _handle_prompt_transaction(tx, db, can_go_back=(idx > 0))
+            # Check if this is an incoming transfer / credit
+            if tx.credit > 0 or tx.tx_type in {"Credito Inmediato Recibido", "Crédito Inmediato Emitido"}:
+                prompt_action, new_rate = _handle_income_or_prompt_transaction(
+                    tx, db, can_go_back=(idx > 0)
+                )
                 if prompt_action == "back":
                     if idx > 0:
                         idx -= 1
                         step_results.pop(idx, None)
+                        current_rate = step_rates.get(idx, current_rate)
                     continue
                 if prompt_action == "exit":
                     current_records = [v for v in step_results.values() if v is not None]
@@ -355,7 +388,10 @@ def run(input_path: Path, dry_run: bool = False) -> None:
                         console.print("[dim]Ejecución cancelada. No se guardaron cambios.[/dim]")
                         return
 
-                step_results[idx] = None
+                if prompt_action == "rate" and new_rate is not None:
+                    current_rate = new_rate
+
+                step_results[idx] = None  # Incomes are not recorded as expenses in app
                 idx += 1
                 continue
 
@@ -364,7 +400,7 @@ def run(input_path: Path, dry_run: bool = False) -> None:
 
             action, data = _handle_transaction_classification(
                 tx,
-                rate=rate,
+                rate=current_rate,
                 db=db,
                 suggested_rule=suggested_rule,
                 can_go_back=(idx > 0),
@@ -375,6 +411,7 @@ def run(input_path: Path, dry_run: bool = False) -> None:
                 if idx > 0:
                     idx -= 1
                     step_results.pop(idx, None)
+                    current_rate = step_rates.get(idx, current_rate)
                 continue
 
             if action == "exit":
@@ -401,6 +438,7 @@ def run(input_path: Path, dry_run: bool = False) -> None:
                     "description": desc,
                     "date": tx.date,
                     "debit": tx.debit,
+                    "rate": current_rate,
                 }
                 idx += 1
 
@@ -420,7 +458,8 @@ def run(input_path: Path, dry_run: bool = False) -> None:
     rnd = AccumulativeRounder()
     records = []
     for step in valid_steps:
-        usd_exact = to_usd(step["debit"], rate)
+        rate_for_step = step["rate"]
+        usd_exact = to_usd(step["debit"], rate_for_step)
         usd_rounded = rnd.round(usd_exact)
         records.append({
             "tx": step["tx"],
@@ -428,6 +467,7 @@ def run(input_path: Path, dry_run: bool = False) -> None:
             "description": step["description"],
             "date": step["date"],
             "debit": step["debit"],
+            "rate": rate_for_step,
             "usd_exact": usd_exact,
             "usd_rounded": usd_rounded,
         })

@@ -143,6 +143,10 @@ class TestExchangeRates:
             assert rate.registered_at is not None
             assert len(rate.registered_at) > 0
 
+        def test_can_set_custom_registered_at_date(self, db):
+            rate = db.add_rate(818.80, notes="Transfer", registered_at="2026-07-24")
+            assert rate.registered_at == "2026-07-24"
+
         def test_notes_defaults_to_empty_string(self, db):
             rate = db.add_rate(845.88)
             assert rate.notes == ""

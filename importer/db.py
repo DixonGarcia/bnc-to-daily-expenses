@@ -238,12 +238,18 @@ class Database:
     # Exchange Rates
     # ------------------------------------------------------------------
 
-    def add_rate(self, rate: float, notes: str = "") -> ExchangeRate:
+    def add_rate(
+        self,
+        rate: float,
+        notes: str = "",
+        registered_at: str | None = None,
+    ) -> ExchangeRate:
         """Record a new Binance → BNC exchange rate.
 
         Args:
             rate: Bolivares per USD (must be positive).
             notes: Optional free-text note (e.g. "100 USDT → BNC").
+            registered_at: Optional ISO date string (e.g. "2026-07-24"). Defaults to current time.
 
         Returns:
             The newly created ExchangeRate.
@@ -254,16 +260,16 @@ class Database:
         if rate <= 0:
             raise ValueError(f"Exchange rate must be positive, got {rate}.")
 
-        now = datetime.now(timezone.utc).isoformat()
+        timestamp = registered_at or datetime.now(timezone.utc).isoformat()
         with self._connection:
             cursor = self._connection.execute(
                 "INSERT INTO exchange_rates (rate, registered_at, notes) VALUES (?, ?, ?)",
-                (rate, now, notes),
+                (rate, timestamp, notes),
             )
             return ExchangeRate(
                 id=cursor.lastrowid,
                 rate=rate,
-                registered_at=now,
+                registered_at=timestamp,
                 notes=notes,
             )
 

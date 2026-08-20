@@ -71,10 +71,10 @@ class TestParse:
             tx_types = [tx.tx_type for tx in result]
             assert "Saldo Inicial" not in tx_types
 
-        def test_filters_out_abono_pago_movil(self, sample_content):
+        def test_keeps_abono_pago_movil(self, sample_content):
             result = parse(sample_content)
             tx_types = [tx.tx_type for tx in result]
-            assert "Abono Pago Movil BNC" not in tx_types
+            assert "Abono Pago Movil BNC" in tx_types
 
         def test_keeps_compra_pos(self, sample_content):
             result = parse(sample_content)
@@ -179,7 +179,7 @@ class TestParse:
         def test_commission_row_is_filtered(self, commission_row):
             assert parse(commission_row) == []
 
-        def test_filters_out_transferencias_recibidas(self):
+        def test_keeps_transferencias_recibidas(self):
             content = (
                 "01910000000000000000@JOHN DOE EXAMPLE@25 ULTIMOS MOVIMIENTOS\r\n"
                 "\r\n"
@@ -188,7 +188,9 @@ class TestParse:
                 "13/07/2026\t18:25:52.143\t182552143\t262\tABONO\tTranf. entre Ctas. Internet\t"
                 "TRANSFERENCIA RECIBIDA DEL BCO. NACIONAL DE CREDITO\t0\t83464\t89260,62\t00000000\r\n"
             )
-            assert parse(content) == []
+            result = parse(content)
+            assert len(result) == 1
+            assert result[0].credit == Decimal("83464")
 
         def test_keeps_pago_servicios(self):
             content = (

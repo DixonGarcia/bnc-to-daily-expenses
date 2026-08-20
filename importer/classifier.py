@@ -58,7 +58,7 @@ def classify(tx: BNCTransaction, db: Database) -> ClassifiedTransaction | None:
     Returns:
         ClassifiedTransaction if classified or prompt-required, None if unknown merchant.
     """
-    if tx.tx_type in _PROMPT_TYPES:
+    if tx.credit > 0 or tx.tx_type in _PROMPT_TYPES:
         return ClassifiedTransaction(
             tx=tx,
             category="",
