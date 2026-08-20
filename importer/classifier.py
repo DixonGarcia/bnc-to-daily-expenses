@@ -66,7 +66,7 @@ def classify(tx: BNCTransaction, db: Database) -> ClassifiedTransaction | None:
             requires_prompt=True,
         )
 
-    if tx.tx_type in _EXPENSE_TYPES:
+    if tx.debit > 0:
         rule = db.find_rule(tx.description)
         if rule is None:
             return None

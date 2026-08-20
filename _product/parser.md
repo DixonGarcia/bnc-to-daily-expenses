@@ -76,16 +76,14 @@ The following rows are silently dropped and never returned:
 | `tx_type` == `"Saldo Inicial"` | Line 4 — balance header row |
 | `tx_type` contains `"Comisión"` | Lines 9, 11, 15… — bank commissions |
 | `tx_type` == `"Comisión Credito Inmediato"` | Line 19 — transfer commission |
-| `credit > 0` and `tx_type` contains `"Abono"` | Line 8 — incoming P2P payment |
+| `credit > 0` and `tx_type != "Credito Inmediato Recibido"` | Line 8, 10 — incoming payments and transfers |
 | Row has fewer than 9 columns | Malformed / empty trailing line |
 
 ### Rows that ARE returned (for further processing)
 
 | `tx_type` | Treatment |
 |---|---|
-| `"Compra de POS DebitMC"` | Expense — classify and import |
-| `"Cargo Pago Movil BNC"` | Expense — classify and import |
-| `"Retiro de Biopago"` | Expense — classify and import |
+| `"Compra de POS DebitMC"`, `"Cargo Pago Movil BNC"`, `"Retiro de Biopago"`, `"Pago MOVISTAR BNCNet"` (any debit > 0) | Expense — classify and import |
 | `"Credito Inmediato Recibido"` | Passed through — triggers interactive prompt |
 | `"Crédito Inmediato Emitido"` | Passed through — triggers interactive prompt |
 
