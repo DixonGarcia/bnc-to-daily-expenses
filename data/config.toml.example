@@ -17,3 +17,11 @@ currency = "USD"
 # [[accounts]]
 # name = "Efectivo"
 # currency = "USD"
+
+# Optional: Override default expense categories
+# categories = [
+#   "Autopista", "Bebidas", "Comida", "Diversión", "Educación",
+#   "Gasolina", "Hijo", "Hogar", "Hotel", "Mascota", "Mercancía",
+#   "Negocio", "Otros", "Personales", "Préstamo", "Propinas",
+#   "Restaurante", "Ropa", "Salud", "Tecnología", "Transporte"
+# ]
