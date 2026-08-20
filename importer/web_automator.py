@@ -1,128 +1,140 @@
 """Web automation for loading expenses into Daily Expenses 4.
 
 Uses Playwright to simulate user interaction with the Angular SPA at
-https://dailyexpenses4.com. Authentication is via Google Sign-In (OAuth).
+https://dailyexpenses4.com.
 
-Session strategy:
-- First run: headed browser for manual Google login. Cookies saved to
-  data/session_cookies.json (gitignored).
-- Subsequent runs: headless, cookies restored from file.
+Authentication strategy (NO credentials are ever stored):
+  - First run: a headed browser window opens. The user logs in manually
+    with Google. Session cookies are saved to data/session_cookies.json
+    (gitignored) for future headless runs.
+  - Subsequent runs: headless, cookies restored from file.
 
-Selector mapping:
-- Selectors were discovered with `playwright codegen https://dailyexpenses4.com/home`
-- They are defined as constants at the top of this module for easy maintenance.
+Flow per expense (discovered with playwright codegen):
+  1. Navigate to Movements section
+  2. Click the FAB (floating action button, no visible text)
+  3. Fill amount (spinbutton)
+  4. Select account from modal
+  5. Select category from modal
+  6. Fill description (textarea)
+  7. Set date via date picker
+  8. Click Save
 """
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 from time import sleep
 
-from playwright.sync_api import Browser, Page, sync_playwright
+from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 from rich.console import Console
 
 console = Console()
 
-# ---------------------------------------------------------------------------
-# App URL
-# ---------------------------------------------------------------------------
 APP_URL = "https://dailyexpenses4.com/home"
+MODAL_ID = "#ModalAddMovements"
 
-# ---------------------------------------------------------------------------
-# Selectors — update here if the app UI changes
-# ---------------------------------------------------------------------------
-# Button to open the "new expense" form
-NEW_EXPENSE_BTN = "button.add-expense-btn, [data-testid='add-expense'], .fab"
-
-# Form fields inside the new expense modal/panel
-AMOUNT_INPUT = "input[placeholder*='amount'], input[type='number']"
-DESCRIPTION_INPUT = "input[placeholder*='description'], input[placeholder*='descripci']"
-DATE_INPUT = "input[type='date']"
-
-# Account selector (dropdown or list)
-ACCOUNT_SELECTOR = "mat-select, select[name='account']"
-
-# Category selector
-CATEGORY_SELECTOR = "mat-select[formcontrolname='category'], select[name='category']"
-
-# Save / confirm button inside the form
-SAVE_BTN = "button[type='submit'], button:has-text('Save'), button:has-text('Guardar')"
+_MONTH_NAMES = {
+    1: "January", 2: "February", 3: "March", 4: "April",
+    5: "May", 6: "June", 7: "July", 8: "August",
+    9: "September", 10: "October", 11: "November", 12: "December",
+}
 
 
 # ---------------------------------------------------------------------------
-# Session management
+# Session management — credentials are NEVER stored, only session cookies
 # ---------------------------------------------------------------------------
 
-def _load_cookies(page: Page, cookies_file: Path) -> bool:
-    """Load saved session cookies into the page context.
+def _cookies_path(config: dict) -> Path:
+    return Path(config["app"]["cookies_file"])
 
-    Returns True if cookies were loaded, False if file does not exist.
+
+def _load_cookies(context: BrowserContext, cookies_file: Path) -> bool:
+    """Restore session cookies into the browser context.
+
+    Returns True if the file existed and cookies were loaded.
     """
     if not cookies_file.exists():
         return False
-    cookies = json.loads(cookies_file.read_text())
-    page.context.add_cookies(cookies)
+    cookies = json.loads(cookies_file.read_text(encoding="utf-8"))
+    context.add_cookies(cookies)
     return True
 
 
-def _save_cookies(page: Page, cookies_file: Path) -> None:
-    """Save current page session cookies to disk."""
+def _save_cookies(context: BrowserContext, cookies_file: Path) -> None:
+    """Persist current session cookies to disk for future headless runs."""
     cookies_file.parent.mkdir(parents=True, exist_ok=True)
-    cookies = page.context.cookies()
-    cookies_file.write_text(json.dumps(cookies, indent=2))
+    cookies_file.write_text(
+        json.dumps(context.cookies(), indent=2), encoding="utf-8"
+    )
 
 
 def _is_logged_in(page: Page) -> bool:
-    """Check if the current page shows the authenticated app UI."""
-    page.wait_for_load_state("networkidle", timeout=10_000)
-    return "login" not in page.url.lower() and page.locator(NEW_EXPENSE_BTN).count() > 0
+    """Check whether the app is showing the authenticated UI."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=12_000)
+        return page.get_by_role("link", name="Movements").count() > 0
+    except Exception:
+        return False
 
 
-def get_authenticated_page(browser: Browser, cookies_file: Path, headless: bool) -> Page:
-    """Return an authenticated page, prompting for manual login if needed.
+def _manual_login(playwright_instance, cookies_file: Path) -> BrowserContext:
+    """Open a headed browser for the user to log in manually with Google.
 
-    Args:
-        browser: Playwright Browser instance.
-        cookies_file: Path to the session cookies JSON file.
-        headless: Whether to run headless. First login always runs headed.
+    Credentials are typed by the user directly in the browser — they are
+    never captured, stored, or transmitted by this program.
 
-    Returns:
-        An authenticated Playwright Page ready to interact with the app.
+    Returns a BrowserContext with an active authenticated session.
     """
+    console.print(
+        "\n[bold yellow]🔑 First-time login required.[/bold yellow]\n"
+        "A browser window will open. Sign in with Google manually.\n"
+        "[dim](Your credentials are entered directly in the browser.\n"
+        "This program never sees or stores them.)[/dim]\n"
+        "Press [bold]Enter[/bold] here once you are logged in and see the app home screen."
+    )
+    browser = playwright_instance.chromium.launch(headless=False)
     context = browser.new_context()
     page = context.new_page()
+    page.goto(APP_URL)
+    input()  # Wait for user to log in
 
-    # Try restoring session from cookies
-    if _load_cookies(page, cookies_file):
+    if not _is_logged_in(page):
+        browser.close()
+        raise RuntimeError(
+            "Could not confirm login. Make sure you are on the app home screen before pressing Enter."
+        )
+
+    _save_cookies(context, cookies_file)
+    console.print("[green]✅ Session saved — future runs will be headless.[/green]")
+    return context
+
+
+def get_authenticated_context(playwright_instance, cookies_file: Path) -> tuple[object, BrowserContext]:
+    """Return (browser, context) with an active authenticated session.
+
+    Tries cookie-based restore first. Falls back to manual headed login.
+    """
+    browser = playwright_instance.chromium.launch(headless=True)
+    context = browser.new_context()
+
+    if _load_cookies(context, cookies_file):
+        page = context.new_page()
         page.goto(APP_URL)
         if _is_logged_in(page):
             console.print("[dim]✅ Session restored from cookies.[/dim]")
-            return page
-        console.print("[yellow]Session expired — need to log in again.[/yellow]")
+            page.close()
+            return browser, context
+        console.print("[yellow]Cookies expired — need to log in again.[/yellow]")
 
-    # Manual login (always headed)
-    console.print(
-        "\n[bold yellow]🔑 Manual login required.[/bold yellow]\n"
-        "A browser window will open. Sign in with Google, then press Enter here."
-    )
-    context.close()
-    headed_context = browser.new_context()
-    page = headed_context.new_page()
-    page.goto(APP_URL)
-
-    input("\nPress Enter after you have logged in successfully...")
-
-    if not _is_logged_in(page):
-        raise RuntimeError("Login failed or app did not load correctly after login.")
-
-    _save_cookies(page, cookies_file)
-    console.print("[green]✅ Session saved.[/green]")
-    return page
+    browser.close()
+    context = _manual_login(playwright_instance, cookies_file)
+    return context.browser, context
 
 
 # ---------------------------------------------------------------------------
-# Expense loading
+# Expense loading — one expense per call
 # ---------------------------------------------------------------------------
 
 def load_expense(
@@ -136,56 +148,95 @@ def load_expense(
 ) -> None:
     """Load a single expense into Daily Expenses 4.
 
-    Clicks the new expense button, fills in the form fields, and saves.
-    Waits for the form to close before returning.
-
     Args:
-        page: Authenticated Playwright page.
-        amount_usd: Whole-dollar amount to record.
-        description: Expense description as shown in the app.
-        category: Category name as it appears in the app's dropdown.
-        account: Account name as it appears in the app.
+        page: Authenticated Playwright page already on the app.
+        amount_usd: Whole-dollar amount to record (e.g. 10).
+        description: Expense description shown in the app.
+        category: Category name exactly as it appears in the app dropdown.
+        account: Account name exactly as it appears in the app (e.g. "Binance").
         expense_date: Date of the expense.
+
+    Raises:
+        Exception: If any step fails (caller logs the error and continues).
     """
-    # Open new expense form
-    page.locator(NEW_EXPENSE_BTN).first.click()
+    modal = page.locator(MODAL_ID)
+
+    # 1. Navigate to Movements
+    page.get_by_role("link", name="Movements").click()
     page.wait_for_load_state("networkidle")
 
-    # Fill amount
-    page.locator(AMOUNT_INPUT).first.fill(str(amount_usd))
+    # 2. Open new expense modal via FAB (button with no visible text)
+    page.get_by_role("button").filter(
+        has_text=re.compile(r"^\s*$")
+    ).last.click()
+    modal.wait_for(state="visible", timeout=8_000)
 
-    # Fill description
-    page.locator(DESCRIPTION_INPUT).first.fill(description)
+    # 3. Amount
+    amount_field = page.get_by_role("spinbutton", name="0")
+    amount_field.click()
+    amount_field.fill(str(amount_usd))
 
-    # Fill date (format: YYYY-MM-DD for HTML date input)
-    page.locator(DATE_INPUT).first.fill(expense_date.isoformat())
+    # 4. Account selector
+    #    The button shows the currently selected account name (dynamic).
+    #    We click it, then pick our target account from the list.
+    _select_account(page, modal, account)
 
-    # Select account
-    _select_option(page, ACCOUNT_SELECTOR, account)
+    # 5. Category
+    page.get_by_role("button", name="Choose a category").click()
+    modal.get_by_text(category, exact=True).click()
 
-    # Select category
-    _select_option(page, CATEGORY_SELECTOR, category)
+    # 6. Description
+    page.locator("textarea").fill(description)
 
-    # Save
-    page.locator(SAVE_BTN).first.click()
+    # 7. Date picker
+    _set_date(page, modal, expense_date)
+
+    # 8. Save
+    page.get_by_role("button", name="Save").click()
     page.wait_for_load_state("networkidle")
-    sleep(0.5)  # Brief pause between entries
+    sleep(0.8)
 
 
-def _select_option(page: Page, selector: str, value: str) -> None:
-    """Select an option in a dropdown by visible text.
+def _select_account(page: Page, modal, account: str) -> None:
+    """Click the account selector button and pick the target account.
 
-    Handles both native <select> and Angular Material mat-select.
+    The button label changes dynamically (it shows the currently selected
+    account name), so we identify it by excluding known static button labels.
     """
-    element = page.locator(selector).first
-    tag = element.evaluate("el => el.tagName.toLowerCase()")
+    # The account button is the one that's neither "Choose a category",
+    # "Save", nor the FAB. It shows the currently active account name.
+    account_btn = modal.get_by_role("button").filter(
+        has_not_text=re.compile(r"Choose a category|Save|Cancel", re.IGNORECASE)
+    ).first
+    account_btn.click()
+    modal.get_by_text(account, exact=True).click()
 
-    if tag == "select":
-        element.select_option(label=value)
-    else:
-        # Angular Material mat-select: click to open, then click the option
-        element.click()
-        page.get_by_role("option", name=value).first.click()
+
+def _set_date(page: Page, modal, expense_date: date) -> None:
+    """Open the date picker, navigate to the correct day, and confirm.
+
+    The date button shows the currently selected date/time as dynamic text
+    (e.g. "19/Aug/2026 11:05 am"), so we match it with a regex.
+    """
+    # Open date picker — button label contains month abbreviation and year
+    modal.get_by_role("button", name=re.compile(r"\w+/\d{4}")).click()
+
+    # Select the correct day
+    month_name = _MONTH_NAMES[expense_date.month]
+    page.get_by_role("button", name=re.compile(
+        rf"{month_name}\s+{expense_date.day}[,\s]"
+    )).click()
+
+    # Set time to noon (time is irrelevant for expense tracking)
+    hours = page.get_by_role("textbox", name="Hours")
+    hours.triple_click()
+    hours.fill("12")
+
+    minutes = page.get_by_role("textbox", name="Minutes")
+    minutes.triple_click()
+    minutes.fill("00")
+
+    page.get_by_role("button", name="Ok").click()
 
 
 # ---------------------------------------------------------------------------
@@ -196,21 +247,25 @@ def run_automation(records: list[dict], account: str, config: dict) -> None:
     """Load all classified records into Daily Expenses 4.
 
     Args:
-        records: List of dicts with keys: tx, category, description,
-                 date, usd_rounded.
+        records: List of dicts with keys: tx, category, description, date, usd_rounded.
         account: Account name in the app (e.g. "Binance").
         config: Loaded config.toml dict.
     """
-    cookies_file = Path(config["app"]["cookies_file"])
+    cookies_file = _cookies_path(config)
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        page = get_authenticated_page(browser, cookies_file, headless=True)
+        browser, context = get_authenticated_context(pw, cookies_file)
+        page = context.new_page()
+        page.goto(APP_URL)
+        page.wait_for_load_state("networkidle")
 
         for i, record in enumerate(records, 1):
             desc = record["description"]
             amt = record["usd_rounded"]
-            console.print(f"   → Loading {i}/{len(records)}: {desc} ${amt}...", end=" ")
+            console.print(
+                f"   [dim]→ {i}/{len(records)}[/dim] {desc} [bold]${amt}[/bold]...",
+                end=" ",
+            )
             try:
                 load_expense(
                     page,
@@ -221,7 +276,7 @@ def run_automation(records: list[dict], account: str, config: dict) -> None:
                     expense_date=record["date"],
                 )
                 console.print("[green]✅[/green]")
-            except Exception as e:
-                console.print(f"[red]❌ Failed: {e}[/red]")
+            except Exception as exc:
+                console.print(f"[red]❌ {exc}[/red]")
 
         browser.close()
