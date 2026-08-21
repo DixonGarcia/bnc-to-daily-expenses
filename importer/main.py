@@ -442,6 +442,35 @@ def run(input_path: Path, dry_run: bool = False) -> None:
                 }
                 idx += 1
 
+            # If all transactions have been reviewed, offer final check / undo before proceeding
+            if idx >= len(new_transactions):
+                valid_count = len([v for v in step_results.values() if v is not None])
+                console.print("\n" + "=" * 80)
+                console.print(f"🎉 [bold green]Se han revisado todos los movimientos ({valid_count} listos para importar)[/bold green]")
+                console.print("=" * 80)
+
+                choices = [
+                    f"🚀 Continuar a la carga en Daily Expenses ({valid_count} transacciones)",
+                    "✏️  Modificar la última transacción clasificada (⬅️ Volver)",
+                    "❌ Cancelar y salir sin guardar nada",
+                ]
+                final_action = questionary.select(
+                    "¿Qué deseas hacer?",
+                    choices=choices,
+                ).ask()
+
+                if final_action and final_action.startswith("✏️"):
+                    if idx > 0:
+                        idx -= 1
+                        step_results.pop(idx, None)
+                        current_rate = step_rates.get(idx, current_rate)
+                    continue
+                elif final_action and final_action.startswith("❌"):
+                    console.print("[dim]Ejecución cancelada. No se guardaron cambios.[/dim]")
+                    return
+                else:
+                    break
+
     except KeyboardInterrupt:
         current_records = [v for v in step_results.values() if v is not None]
         exit_action = _handle_exit_flow(current_records)

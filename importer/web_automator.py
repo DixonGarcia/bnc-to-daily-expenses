@@ -6,7 +6,7 @@ https://dailyexpenses4.com.
 Angular Components:
   - Account picker:  <app-selector-account>
   - Category picker: <app-selector-category>
-  - Date picker:     <app-date-time-picker>
+  - Date & Time picker: <app-date-time-picker> (mat-calendar + ngb-timepicker)
   - Save button:     button.save-movement-button
 """
 from __future__ import annotations
@@ -24,6 +24,21 @@ console = Console()
 
 APP_URL = "https://dailyexpenses4.com/home"
 MODAL_ID = "#ModalAddMovements"
+
+_SPANISH_MONTHS = {
+    "ENE": 1, "ENERO": 1,
+    "FEB": 2, "FEBRERO": 2,
+    "MAR": 3, "MARZO": 3,
+    "ABR": 4, "ABRIL": 4,
+    "MAY": 5, "MAYO": 5,
+    "JUN": 6, "JUNIO": 6,
+    "JUL": 7, "JULIO": 7,
+    "AGO": 8, "AGOSTO": 8,
+    "SEP": 9, "SEPTIEMBRE": 9,
+    "OCT": 10, "OCTUBRE": 10,
+    "NOV": 11, "NOVIEMBRE": 11,
+    "DIC": 12, "DICIEMBRE": 12,
+}
 
 
 def _session_file_path(config: dict) -> Path:
@@ -94,6 +109,115 @@ def get_authenticated_context(playwright_instance, session_file: Path) -> tuple[
 
 
 # ---------------------------------------------------------------------------
+# Date & Time Picker Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_calendar_header(text: str) -> tuple[int, int] | None:
+    """Extract (year, month_number) from mat-calendar header text (e.g. 'AGO 2026' or 'JULIO 2026')."""
+    if not text:
+        return None
+    upper = text.strip().upper()
+    match = re.search(r"\b(20\d\d)\b", upper)
+    year = int(match.group(1)) if match else date.today().year
+
+    for name, month_num in sorted(_SPANISH_MONTHS.items(), key=lambda x: len(x[0]), reverse=True):
+        if name in upper:
+            return (year, month_num)
+    return None
+
+
+def _parse_time_12h(time_str: str) -> tuple[int, int, str]:
+    """Parse a time string (e.g. '18:14:47.155' or '08:35') into (hour_12, minute, meridian)."""
+    if not time_str:
+        return (12, 0, "AM")
+    try:
+        parts = time_str.strip().split(":")
+        hour_24 = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+        is_pm = hour_24 >= 12
+        hour_12 = hour_24 % 12
+        if hour_12 == 0:
+            hour_12 = 12
+        meridian = "PM" if is_pm else "AM"
+        return (hour_12, minute, meridian)
+    except Exception:
+        return (12, 0, "AM")
+
+
+def _set_date_and_time(modal, expense_date: date, expense_time: str = "") -> None:
+    """Set the exact date and time in the <app-date-time-picker> component."""
+    date_btn = modal.locator("app-date-time-picker button.btn")
+    if date_btn.count() == 0:
+        return
+
+    date_btn.first.click()
+    modal.page.wait_for_timeout(300)
+
+    # 1. Navigate Calendar Month & Year
+    target_year = expense_date.year
+    target_month = expense_date.month
+
+    for _ in range(24):  # safety max 24 months navigation
+        header_btn = modal.locator("mat-calendar button.mat-calendar-period-button")
+        if header_btn.count() == 0:
+            break
+        header_text = header_btn.first.inner_text()
+        current = _parse_calendar_header(header_text)
+        if not current:
+            break
+
+        curr_year, curr_month = current
+        if (curr_year, curr_month) == (target_year, target_month):
+            break
+
+        if (curr_year, curr_month) > (target_year, target_month):
+            prev_btn = modal.locator("mat-calendar button.mat-calendar-previous-button")
+            if prev_btn.count() > 0:
+                prev_btn.first.click()
+                modal.page.wait_for_timeout(150)
+        else:
+            next_btn = modal.locator("mat-calendar button.mat-calendar-next-button")
+            if next_btn.count() > 0:
+                next_btn.first.click()
+                modal.page.wait_for_timeout(150)
+
+    # 2. Select the specific Day in the month
+    day_cell = modal.locator("mat-calendar button.mat-calendar-body-cell").filter(
+        has_text=re.compile(rf"^\s*{expense_date.day}\s*$")
+    ).first
+    if day_cell.count() > 0:
+        day_cell.click()
+        modal.page.wait_for_timeout(200)
+
+    # 3. Set Time in ngb-timepicker
+    hour_12, minute, target_meridian = _parse_time_12h(expense_time)
+
+    hour_input = modal.locator("ngb-timepicker input[aria-label='Hours'], ngb-timepicker .ngb-tp-hour input")
+    if hour_input.count() > 0:
+        hour_input.first.click()
+        hour_input.first.fill(f"{hour_12:02d}")
+
+    minute_input = modal.locator("ngb-timepicker input[aria-label='Minutes'], ngb-timepicker .ngb-tp-minute input")
+    if minute_input.count() > 0:
+        minute_input.first.click()
+        minute_input.first.fill(f"{minute:02d}")
+
+    meridian_btn = modal.locator("ngb-timepicker .ngb-tp-meridian button")
+    if meridian_btn.count() > 0:
+        current_meridian = meridian_btn.first.inner_text().strip().upper()
+        if current_meridian != target_meridian:
+            meridian_btn.first.click()
+
+    modal.page.wait_for_timeout(200)
+
+    # 4. Confirm by clicking 'Aceptar'
+    ok_btn = modal.locator("app-date-time-picker button").filter(has_text=re.compile(r"Aceptar|Ok", re.IGNORECASE))
+    if ok_btn.count() > 0:
+        ok_btn.first.click()
+        modal.page.wait_for_timeout(200)
+
+
+# ---------------------------------------------------------------------------
 # Expense loading — one expense per call
 # ---------------------------------------------------------------------------
 
@@ -105,6 +229,7 @@ def load_expense(
     category: str,
     account: str,
     expense_date: date,
+    expense_time: str = "",
 ) -> None:
     """Load a single expense into Daily Expenses 4."""
     modal = page.locator(MODAL_ID)
@@ -150,25 +275,8 @@ def load_expense(
     # 6. Description
     modal.locator("textarea").fill(description)
 
-    # 7. Date picker via <app-date-time-picker>
-    date_btn = modal.locator("app-date-time-picker button.btn")
-    if date_btn.count() > 0:
-        date_btn.first.click()
-        page.wait_for_timeout(300)
-
-        # Select the day number in calendar
-        day_cell = page.locator("mat-calendar button.mat-calendar-body-cell").filter(
-            has_text=re.compile(rf"^\s*{expense_date.day}\s*$")
-        ).first
-        if day_cell.count() > 0:
-            day_cell.click()
-            page.wait_for_timeout(200)
-
-        # Confirm date
-        ok_btn = page.locator("app-date-time-picker button").filter(has_text=re.compile(r"Ok|Aceptar", re.IGNORECASE))
-        if ok_btn.count() > 0:
-            ok_btn.first.click()
-            page.wait_for_timeout(200)
+    # 7. Date & Time picker via <app-date-time-picker>
+    _set_date_and_time(modal, expense_date=expense_date, expense_time=expense_time)
 
     # 8. Save button
     modal.locator("button.save-movement-button").click()
@@ -201,6 +309,7 @@ def run_automation(records: list[dict], account: str, config: dict) -> None:
             amt = record["usd_rounded"]
             cat = record.get("category", "Otros")
             tx_date = record.get("date", date.today())
+            tx_time = record.get("time", "") or getattr(record.get("tx"), "time", "")
 
             console.print(
                 f"   [dim]→ {i}/{len(records)}[/dim] {desc} [bold]${amt}[/bold] ({cat})...",
@@ -214,6 +323,7 @@ def run_automation(records: list[dict], account: str, config: dict) -> None:
                     category=cat,
                     account=account,
                     expense_date=tx_date,
+                    expense_time=tx_time,
                 )
                 console.print("[green]✅[/green]")
             except Exception as exc:
