@@ -116,8 +116,12 @@ class TestProcessedTransactions:
 
     class WhenMarkingAsProcessed:
         def test_stores_reference_with_metadata(self, db):
-            db.mark_processed("819155311", amount_usd=10, description="Charcutería")
+            db.mark_processed("819155311", amount_usd=10, description="Charcutería", category="Comida")
             assert db.is_processed("819155311") is True
+            row = db._connection.execute(
+                "SELECT * FROM processed_transactions WHERE reference = ?", ("819155311",)
+            ).fetchone()
+            assert row["category"] == "Comida"
 
         def test_raises_on_duplicate_reference(self, db):
             db.mark_processed("819155311", amount_usd=10, description="Charcutería")
