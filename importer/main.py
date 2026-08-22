@@ -533,6 +533,7 @@ def run(input_path: Path, dry_run: bool = False) -> None:
                 reference=_tx_key(r["tx"]),
                 amount_usd=r["usd_rounded"],
                 description=r["description"],
+                category=r["category"],
             )
         except ValueError:
             pass

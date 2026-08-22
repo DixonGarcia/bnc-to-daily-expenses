@@ -84,7 +84,8 @@ class Database:
                     reference    TEXT PRIMARY KEY,
                     processed_at TEXT NOT NULL,
                     amount_usd   INTEGER NOT NULL,
-                    description  TEXT NOT NULL
+                    description  TEXT NOT NULL,
+                    category     TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE TABLE IF NOT EXISTS exchange_rates (
@@ -94,6 +95,12 @@ class Database:
                     notes         TEXT NOT NULL DEFAULT ''
                 );
             """)
+            try:
+                self._connection.execute(
+                    "ALTER TABLE processed_transactions ADD COLUMN category TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
 
     # ------------------------------------------------------------------
     # Merchant Rules
@@ -211,6 +218,7 @@ class Database:
         reference: str,
         amount_usd: int,
         description: str,
+        category: str = "",
     ) -> None:
         """Record a transaction as successfully imported.
 
@@ -218,6 +226,7 @@ class Database:
             reference: The BNC "Referencia" field value.
             amount_usd: Rounded whole-dollar amount that was loaded.
             description: Description as recorded in Daily Expenses 4.
+            category: Category as recorded in Daily Expenses 4.
 
         Raises:
             ValueError: If the reference was already marked as processed.
@@ -229,9 +238,9 @@ class Database:
         with self._connection:
             self._connection.execute(
                 "INSERT INTO processed_transactions "
-                "(reference, processed_at, amount_usd, description) "
-                "VALUES (?, ?, ?, ?)",
-                (reference, now, amount_usd, description),
+                "(reference, processed_at, amount_usd, description, category) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (reference, now, amount_usd, description, category),
             )
 
     # ------------------------------------------------------------------

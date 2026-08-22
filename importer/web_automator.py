@@ -25,7 +25,8 @@ console = Console()
 APP_URL = "https://dailyexpenses4.com/home"
 MODAL_ID = "#ModalAddMovements"
 
-_SPANISH_MONTHS = {
+_ALL_MONTHS = {
+    # Spanish
     "ENE": 1, "ENERO": 1,
     "FEB": 2, "FEBRERO": 2,
     "MAR": 3, "MARZO": 3,
@@ -38,6 +39,18 @@ _SPANISH_MONTHS = {
     "OCT": 10, "OCTUBRE": 10,
     "NOV": 11, "NOVIEMBRE": 11,
     "DIC": 12, "DICIEMBRE": 12,
+    # English
+    "JAN": 1, "JANUARY": 1,
+    "FEBRUARY": 2,
+    "MARCH": 3,
+    "APR": 4, "APRIL": 4,
+    "JUNE": 6,
+    "JULY": 7,
+    "AUG": 8, "AUGUST": 8,
+    "SEPTEMBER": 9,
+    "OCTOBER": 10,
+    "NOVEMBER": 11,
+    "DEC": 12, "DECEMBER": 12,
 }
 
 
@@ -48,11 +61,11 @@ def _session_file_path(config: dict) -> Path:
 def _is_logged_in(page: Page) -> bool:
     """Check whether the app is showing the authenticated UI."""
     try:
-        page.wait_for_load_state("networkidle", timeout=12_000)
+        page.wait_for_selector("app-navbar, [routerlink='/movements'], a[href*='movements'], a[href*='home'], .navbar", timeout=6_000)
+        return True
+    except Exception:
         nav_link = page.get_by_role("link", name=re.compile(r"Movimientos|Movements|Inicio|Home", re.IGNORECASE))
         return nav_link.count() > 0
-    except Exception:
-        return False
 
 
 def _manual_login(playwright_instance, session_file: Path) -> BrowserContext:
@@ -70,7 +83,7 @@ def _manual_login(playwright_instance, session_file: Path) -> BrowserContext:
     browser = playwright_instance.chromium.launch(headless=False)
     context = browser.new_context()
     page = context.new_page()
-    page.goto(APP_URL)
+    page.goto(APP_URL, wait_until="domcontentloaded", timeout=30_000)
     input()  # Wait for user to log in
 
     if not _is_logged_in(page):
@@ -85,16 +98,21 @@ def _manual_login(playwright_instance, session_file: Path) -> BrowserContext:
     return context
 
 
-def get_authenticated_context(playwright_instance, session_file: Path) -> tuple[object, BrowserContext]:
+def get_authenticated_context(
+    playwright_instance,
+    session_file: Path,
+    headless: bool = True,
+    slow_mo: int = 0,
+) -> tuple[object, BrowserContext]:
     """Return (browser, context) with an active authenticated session."""
     if session_file.exists():
         try:
             content = session_file.read_text(encoding="utf-8").strip()
             if content and content != "[]":
-                browser = playwright_instance.chromium.launch(headless=True)
+                browser = playwright_instance.chromium.launch(headless=headless, slow_mo=slow_mo)
                 context = browser.new_context(storage_state=str(session_file))
                 page = context.new_page()
-                page.goto(APP_URL)
+                page.goto(APP_URL, wait_until="domcontentloaded", timeout=20_000)
                 if _is_logged_in(page):
                     console.print("[dim]✅ Session restored successfully.[/dim]")
                     page.close()
@@ -113,14 +131,14 @@ def get_authenticated_context(playwright_instance, session_file: Path) -> tuple[
 # ---------------------------------------------------------------------------
 
 def _parse_calendar_header(text: str) -> tuple[int, int] | None:
-    """Extract (year, month_number) from mat-calendar header text (e.g. 'AGO 2026' or 'JULIO 2026')."""
+    """Extract (year, month_number) from mat-calendar header text (e.g. 'AGO 2026', 'AUG 2026', 'JULIO 2026')."""
     if not text:
         return None
     upper = text.strip().upper()
     match = re.search(r"\b(20\d\d)\b", upper)
     year = int(match.group(1)) if match else date.today().year
 
-    for name, month_num in sorted(_SPANISH_MONTHS.items(), key=lambda x: len(x[0]), reverse=True):
+    for name, month_num in sorted(_ALL_MONTHS.items(), key=lambda x: len(x[0]), reverse=True):
         if name in upper:
             return (year, month_num)
     return None
@@ -146,7 +164,7 @@ def _parse_time_12h(time_str: str) -> tuple[int, int, str]:
 
 def _set_date_and_time(modal, expense_date: date, expense_time: str = "") -> None:
     """Set the exact date and time in the <app-date-time-picker> component."""
-    date_btn = modal.locator("app-date-time-picker button.btn")
+    date_btn = modal.locator("app-date-time-picker button.btn, app-date-time-picker button[data-bs-toggle='dropdown']")
     if date_btn.count() == 0:
         return
 
@@ -171,12 +189,12 @@ def _set_date_and_time(modal, expense_date: date, expense_time: str = "") -> Non
             break
 
         if (curr_year, curr_month) > (target_year, target_month):
-            prev_btn = modal.locator("mat-calendar button.mat-calendar-previous-button")
+            prev_btn = modal.locator("mat-calendar button.mat-calendar-previous-button, mat-calendar button[aria-label*='Previous'], mat-calendar button[aria-label*='Anterior']")
             if prev_btn.count() > 0:
                 prev_btn.first.click()
                 modal.page.wait_for_timeout(150)
         else:
-            next_btn = modal.locator("mat-calendar button.mat-calendar-next-button")
+            next_btn = modal.locator("mat-calendar button.mat-calendar-next-button, mat-calendar button[aria-label*='Next'], mat-calendar button[aria-label*='Siguiente']")
             if next_btn.count() > 0:
                 next_btn.first.click()
                 modal.page.wait_for_timeout(150)
@@ -184,7 +202,12 @@ def _set_date_and_time(modal, expense_date: date, expense_time: str = "") -> Non
     # 2. Select the specific Day in the month
     day_cell = modal.locator("mat-calendar button.mat-calendar-body-cell").filter(
         has_text=re.compile(rf"^\s*{expense_date.day}\s*$")
+    ).or_(
+        modal.locator(f"mat-calendar button[aria-label*='{expense_date.day} ']")
+    ).or_(
+        modal.locator(f"mat-calendar button[aria-label*=' {expense_date.day},']")
     ).first
+
     if day_cell.count() > 0:
         day_cell.click()
         modal.page.wait_for_timeout(200)
@@ -192,12 +215,12 @@ def _set_date_and_time(modal, expense_date: date, expense_time: str = "") -> Non
     # 3. Set Time in ngb-timepicker
     hour_12, minute, target_meridian = _parse_time_12h(expense_time)
 
-    hour_input = modal.locator("ngb-timepicker input[aria-label='Hours'], ngb-timepicker .ngb-tp-hour input")
+    hour_input = modal.locator("ngb-timepicker input[aria-label*='Hour'], ngb-timepicker input[aria-label*='Hora'], ngb-timepicker .ngb-tp-hour input, ngb-timepicker input[placeholder='HH']")
     if hour_input.count() > 0:
         hour_input.first.click()
         hour_input.first.fill(f"{hour_12:02d}")
 
-    minute_input = modal.locator("ngb-timepicker input[aria-label='Minutes'], ngb-timepicker .ngb-tp-minute input")
+    minute_input = modal.locator("ngb-timepicker input[aria-label*='Minute'], ngb-timepicker input[aria-label*='Minuto'], ngb-timepicker .ngb-tp-minute input, ngb-timepicker input[placeholder='MM']")
     if minute_input.count() > 0:
         minute_input.first.click()
         minute_input.first.fill(f"{minute:02d}")
@@ -205,13 +228,13 @@ def _set_date_and_time(modal, expense_date: date, expense_time: str = "") -> Non
     meridian_btn = modal.locator("ngb-timepicker .ngb-tp-meridian button")
     if meridian_btn.count() > 0:
         current_meridian = meridian_btn.first.inner_text().strip().upper()
-        if current_meridian != target_meridian:
+        if target_meridian in ("AM", "PM") and current_meridian != target_meridian:
             meridian_btn.first.click()
 
     modal.page.wait_for_timeout(200)
 
-    # 4. Confirm by clicking 'Aceptar'
-    ok_btn = modal.locator("app-date-time-picker button").filter(has_text=re.compile(r"Aceptar|Ok", re.IGNORECASE))
+    # 4. Confirm by clicking 'Aceptar' / 'Ok'
+    ok_btn = modal.locator("app-date-time-picker button").filter(has_text=re.compile(r"Aceptar|Ok|Confirm", re.IGNORECASE))
     if ok_btn.count() > 0:
         ok_btn.first.click()
         modal.page.wait_for_timeout(200)
@@ -234,17 +257,20 @@ def load_expense(
     """Load a single expense into Daily Expenses 4."""
     modal = page.locator(MODAL_ID)
 
-    # 1. Navigate to Movements / Movimientos
-    movimientos_link = page.get_by_role("link", name=re.compile(r"Movimientos|Movements", re.IGNORECASE))
-    if movimientos_link.count() > 0:
-        movimientos_link.first.click()
-        page.wait_for_load_state("networkidle")
+    # 1. If modal is not already open, ensure we are on movements and open modal
+    if not modal.is_visible():
+        if "/movements" not in page.url:
+            movimientos_link = page.get_by_role("link", name=re.compile(r"Movimientos|Movements", re.IGNORECASE))
+            if movimientos_link.count() > 0:
+                movimientos_link.first.click()
+                page.wait_for_load_state("networkidle")
 
-    # 2. Open new expense modal via FAB (+) button
-    page.get_by_role("button").filter(
-        has_text=re.compile(r"^\s*$")
-    ).last.click()
-    modal.wait_for(state="visible", timeout=8_000)
+        fab_btn = page.locator("button.btn-floating, button.floating-action-button").or_(
+            page.get_by_role("button").filter(has_text=re.compile(r"^\s*$"))
+        )
+        if fab_btn.count() > 0:
+            fab_btn.last.click()
+        modal.wait_for(state="visible", timeout=8_000)
 
     # 3. Amount input
     amount_field = modal.locator("input.quantity, input[type='number']").first
@@ -258,7 +284,6 @@ def load_expense(
     if account_item.count() > 0:
         account_item.click()
     else:
-        # Fallback to text inside modal
         modal.get_by_text(account, exact=True).first.click()
     page.wait_for_timeout(300)
 
@@ -279,9 +304,16 @@ def load_expense(
     _set_date_and_time(modal, expense_date=expense_date, expense_time=expense_time)
 
     # 8. Save button
-    modal.locator("button.save-movement-button").click()
+    save_btn = modal.locator("button.save-movement-button").or_(
+        page.get_by_role("button", name=re.compile(r"Save|Guardar", re.IGNORECASE))
+    )
+    save_btn.first.click()
     page.wait_for_load_state("networkidle")
-    sleep(0.8)
+    try:
+        modal.wait_for(state="hidden", timeout=6_000)
+    except Exception:
+        pass
+    sleep(0.5)
 
 
 # ---------------------------------------------------------------------------
