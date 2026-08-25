@@ -257,45 +257,64 @@ def load_expense(
     """Load a single expense into Daily Expenses 4."""
     modal = page.locator(MODAL_ID)
 
-    # 1. If modal is not already open, ensure we are on movements and open modal
+    # 1. If modal is stuck open from previous error, close it first
+    if modal.is_visible():
+        try:
+            close_btn = modal.locator("button.btn-close, [aria-label='Close'], button").filter(has_text=re.compile(r"Cancelar|Cancel|Close", re.IGNORECASE))
+            if close_btn.count() > 0:
+                close_btn.first.click()
+                page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+    # 2. Open Add Movement modal via FAB (+) button
     if not modal.is_visible():
         if "/movements" not in page.url:
             movimientos_link = page.get_by_role("link", name=re.compile(r"Movimientos|Movements", re.IGNORECASE))
             if movimientos_link.count() > 0:
                 movimientos_link.first.click()
                 page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(500)
 
-        fab_btn = page.locator("button.btn-floating, button.floating-action-button").or_(
-            page.get_by_role("button").filter(has_text=re.compile(r"^\s*$"))
-        )
+        fab_btn = page.locator(
+            "button.btn-circle-lg, button.btn-floating, button.floating-action-button, button.btn-primary:has(img[src*='icon-add']), button:has(i.bi-plus)"
+        ).or_(page.get_by_role("button").filter(has_text=re.compile(r"^\s*$")))
+
         if fab_btn.count() > 0:
             fab_btn.last.click()
-        modal.wait_for(state="visible", timeout=8_000)
+        try:
+            modal.wait_for(state="visible", timeout=10_000)
+        except Exception:
+            # Fallback: re-click FAB button if not opened
+            if fab_btn.count() > 0:
+                fab_btn.last.click()
+            modal.wait_for(state="visible", timeout=8_000)
 
     # 3. Amount input
-    amount_field = modal.locator("input.quantity, input[type='number']").first
+    amount_field = modal.locator("input.quantity, input[type='number'], input").first
+    amount_field.wait_for(state="visible", timeout=8_000)
     amount_field.click()
     amount_field.fill(str(amount_usd))
 
     # 4. Account selector via <app-selector-account>
     modal.locator("app-selector-account button").click()
-    page.wait_for_timeout(300)
+    page.wait_for_timeout(250)
     account_item = modal.locator("app-selector-account .dropdown-menu .item-list").filter(has_text=account).first
     if account_item.count() > 0:
         account_item.click()
     else:
         modal.get_by_text(account, exact=True).first.click()
-    page.wait_for_timeout(300)
+    page.wait_for_timeout(250)
 
     # 5. Category selector via <app-selector-category>
     modal.locator("app-selector-category button").click()
-    page.wait_for_timeout(300)
+    page.wait_for_timeout(250)
     category_item = modal.locator("app-selector-category .dropdown-menu .item-list").filter(has_text=category).first
     if category_item.count() > 0:
         category_item.click()
     else:
         modal.get_by_text(category, exact=True).first.click()
-    page.wait_for_timeout(300)
+    page.wait_for_timeout(250)
 
     # 6. Description
     modal.locator("textarea").fill(description)
@@ -304,49 +323,78 @@ def load_expense(
     _set_date_and_time(modal, expense_date=expense_date, expense_time=expense_time)
 
     # 8. Save button
-    save_btn = modal.locator("button.save-movement-button").or_(
-        page.get_by_role("button", name=re.compile(r"Save|Guardar", re.IGNORECASE))
+    save_btn = modal.locator("button.save-movement-button, button[type='submit']").or_(
+        modal.locator("button").filter(has_text=re.compile(r"Save|Guardar", re.IGNORECASE))
     )
     save_btn.first.click()
     page.wait_for_load_state("networkidle")
     try:
-        modal.wait_for(state="hidden", timeout=6_000)
+        modal.wait_for(state="hidden", timeout=8_000)
     except Exception:
         pass
-    sleep(0.5)
+    page.wait_for_timeout(400)
 
 
 # ---------------------------------------------------------------------------
 # Main automation entry point
 # ---------------------------------------------------------------------------
 
-def run_automation(records: list[dict], account: str, config: dict) -> None:
+def run_automation(
+    records: list[dict],
+    account: str,
+    config: dict,
+    headless: bool = True,
+) -> dict[str, list[dict]]:
     """Load all classified records into Daily Expenses 4.
 
     Args:
         records: List of dicts with keys: tx, category, description, date, usd_rounded.
         account: Account name in the app (e.g. "Binance").
         config: Loaded config.toml dict.
+        headless: If False, run browser with visible UI (headed mode).
+
+    Returns:
+        Dict with keys 'synced' (list of success dicts), 'failed' (list of failure dicts),
+        and 'skipped_zero' (list of $0 dicts).
     """
+    from importer.logger import log_sync_attempt, log_sync_error, log_sync_success
+
     session_file = _session_file_path(config)
+    results = {"synced": [], "failed": [], "skipped_zero": []}
 
     with sync_playwright() as pw:
-        browser, context = get_authenticated_context(pw, session_file)
+        browser, context = get_authenticated_context(
+            pw, session_file, headless=headless, slow_mo=100 if not headless else 0
+        )
         page = context.new_page()
-        page.goto(APP_URL)
-        page.wait_for_load_state("networkidle")
+        page.goto(APP_URL, wait_until="domcontentloaded", timeout=25_000)
+        try:
+            page.wait_for_selector("app-navbar, [routerlink='/movements']", timeout=10_000)
+        except Exception:
+            pass
 
         for i, record in enumerate(records, 1):
             desc = record["description"]
             amt = record["usd_rounded"]
             cat = record.get("category", "Otros")
+            tx_obj = record.get("tx")
+            ref = getattr(tx_obj, "reference", "") if tx_obj else record.get("reference", "")
             tx_date = record.get("date", date.today())
-            tx_time = record.get("time", "") or getattr(record.get("tx"), "time", "")
+            tx_time = record.get("time", "") or getattr(tx_obj, "time", "")
+
+            # If amount is 0, skip web entry
+            if amt <= 0:
+                console.print(f"   [dim]→ {i}/{len(records)}[/dim] {desc} [dim]($0, omitido de la app)[/dim]")
+                log_sync_attempt(ref, desc, cat, amt, tx_date.strftime("%d/%m/%Y"), tx_time)
+                log_sync_success(ref, desc, amt)
+                results["skipped_zero"].append(record)
+                continue
 
             console.print(
                 f"   [dim]→ {i}/{len(records)}[/dim] {desc} [bold]${amt}[/bold] ({cat})...",
                 end=" ",
             )
+            log_sync_attempt(ref, desc, cat, amt, tx_date.strftime("%d/%m/%Y"), tx_time)
             try:
                 load_expense(
                     page,
@@ -358,7 +406,15 @@ def run_automation(records: list[dict], account: str, config: dict) -> None:
                     expense_time=tx_time,
                 )
                 console.print("[green]✅[/green]")
+                log_sync_success(ref, desc, amt)
+                results["synced"].append(record)
             except Exception as exc:
                 console.print(f"[red]❌ {exc}[/red]")
+                log_sync_error(ref, desc, exc)
+                record_failed = dict(record)
+                record_failed["error"] = str(exc)
+                results["failed"].append(record_failed)
 
         browser.close()
+
+    return results

@@ -19,11 +19,15 @@ Orchestrates the full import pipeline:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import tomllib
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+
+# Ensure repo root is on sys.path for direct execution
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import questionary
 from rich.console import Console
@@ -32,6 +36,11 @@ from rich.table import Table
 from importer.classifier import classify
 from importer.converter import to_usd
 from importer.db import Database, MerchantRule
+from importer.logger import (
+    log_session_end,
+    log_session_start,
+    log_tx_decision,
+)
 from importer.parser import parse
 from importer.rounder import AccumulativeRounder
 
@@ -39,6 +48,42 @@ console = Console()
 
 _DB_PATH = Path("data/importer.db")
 _CONFIG_PATH = Path("data/config.toml")
+
+
+def extract_rule_pattern(raw_description: str) -> str:
+    """Extract clean merchant/beneficiary pattern from raw BNC description."""
+    desc = raw_description.strip()
+
+    # 1. Match "TRANSFERENCIA A FAVOR DE: <merchant>" or "TRANSF... DE: <merchant>"
+    match_favor = re.search(r"(?:TRANSFERENCIA\s+)?A\s+FAVOR\s+DE:\s*(.*)", desc, re.IGNORECASE)
+    if match_favor:
+        target = match_favor.group(1).strip()
+        if target:
+            return target[:25].strip()
+
+    # 2. Match "TRANSFERENCIA ... A NOMBRE DE: <name>"
+    match_nombre = re.search(r"A\s+NOMBRE\s+DE:\s*(.*)", desc, re.IGNORECASE)
+    if match_nombre:
+        target = match_nombre.group(1).strip()
+        if target:
+            return target[:25].strip()
+
+    # 3. Match Pago Móvil / Instant Transfer: "TELF:... CED:... CTA:... BANCO:... <Concept/Name>"
+    match_pm = re.sub(
+        r"^(?:TELF\.?:\s*\S+\s+)?(?:CED\.?:\s*\S+\s+)?(?:CTA\.?:\s*\S+\s+)?(?:BANCO:\s*\S+\s+)?",
+        "",
+        desc,
+        flags=re.IGNORECASE,
+    )
+    if match_pm and match_pm != desc:
+        clean_pm = match_pm.strip()
+        if clean_pm:
+            return clean_pm[:25].strip()
+
+    # 4. Standard POS / Biopago: strip terminal parameters
+    clean_pos = re.sub(r"\s+VEN\s+ZONA=.*", "", desc, flags=re.IGNORECASE)
+    clean_pos = re.sub(r"\s+BANCO:\s*\S+.*", "", clean_pos, flags=re.IGNORECASE)
+    return clean_pos[:25].strip()
 
 DEFAULT_CATEGORIES = [
     "Autopista",
@@ -171,6 +216,7 @@ def _handle_transaction_classification(
     rate: Decimal,
     db: Database,
     suggested_rule: MerchantRule | None = None,
+    saved_classification: dict | None = None,
     can_go_back: bool = False,
     categories: list[str] | None = None,
 ) -> tuple[str, tuple[str, str] | None]:
@@ -189,7 +235,22 @@ def _handle_transaction_classification(
     console.print(f"  [dim]Monto:[/dim] [bold yellow]Bs {tx.debit:,.2f}[/bold yellow]  →  [bold green]~${usd:.2f} USD[/bold green] [dim]@{rate} Bs/$[/dim]")
     console.print("=" * 80)
 
-    if suggested_rule:
+    if saved_classification:
+        saved_cat = saved_classification.get("category", "")
+        saved_desc = saved_classification.get("description", "")
+        saved_amt = saved_classification.get("amount_usd", "")
+        console.print(
+            f"🔄 [bold yellow]Datos clasificados previamente:[/bold yellow] "
+            f"Categoría: [cyan]{saved_cat}[/cyan] | "
+            f"Descripción: [white]{saved_desc}[/white] | "
+            f"Monto guardado: [bold green]${saved_amt} USD[/bold green]\n"
+        )
+        choices = [
+            f"✅ Aceptar datos previos ({saved_cat} / {saved_desc})",
+            "✏️  Modificar descripción o categoría",
+            "⏭️  Omitir esta transacción",
+        ]
+    elif suggested_rule:
         console.print(
             f"💡 [bold green]Regla sugerida:[/bold green] "
             f"Categoría: [cyan]{suggested_rule.category}[/cyan] | "
@@ -225,13 +286,27 @@ def _handle_transaction_classification(
     if action == "⏭️  Omitir esta transacción":
         return "skip", None
 
+    if saved_classification and action.startswith("✅ Aceptar datos previos"):
+        return "classify", (saved_cat, saved_desc)
+
     if suggested_rule and action.startswith("✅ Aceptar sugerencia"):
         return "classify", (suggested_rule.category, suggested_rule.description)
 
     # Classify or Edit
     cat_choices = (categories or DEFAULT_CATEGORIES) + ["(Escribir otra...)"]
-    default_cat = suggested_rule.category if (suggested_rule and suggested_rule.category in cat_choices) else "Comida"
-    default_desc = suggested_rule.description if suggested_rule else ""
+    if saved_classification and saved_classification.get("category") in cat_choices:
+        default_cat = saved_classification.get("category")
+    elif suggested_rule and suggested_rule.category in cat_choices:
+        default_cat = suggested_rule.category
+    else:
+        default_cat = "Comida"
+
+    if saved_classification:
+        default_desc = saved_classification.get("description", "")
+    elif suggested_rule:
+        default_desc = suggested_rule.description
+    else:
+        default_desc = ""
 
     selected_cat = questionary.select(
         "Categoría:",
@@ -253,17 +328,23 @@ def _handle_transaction_classification(
     if not suggested_rule or description != suggested_rule.description or category != suggested_rule.category:
         save = questionary.confirm("¿Guardar/actualizar esta regla para compras futuras?", default=True).ask()
         if save:
-            pattern = tx.description[:20].strip()
-            try:
-                db.add_rule(pattern, category, description)
-                console.print(f"[green]✅ Regla guardada:[/green] '{pattern}' → {category} / {description}")
-            except ValueError:
-                with db._connection:
-                    db._connection.execute(
-                        "UPDATE merchant_rules SET category = ?, description = ? WHERE pattern = ?",
-                        (category, description, pattern),
-                    )
-                console.print(f"[green]✅ Regla actualizada:[/green] '{pattern}' → {category} / {description}")
+            suggested_pattern = extract_rule_pattern(tx.description)
+            pattern = questionary.text(
+                "Patrón a identificar en compras futuras (Cédula/RIF o nombre):",
+                default=suggested_pattern,
+            ).ask()
+            if pattern:
+                pattern = pattern.strip()
+                try:
+                    db.add_rule(pattern, category, description)
+                    console.print(f"[green]✅ Regla guardada:[/green] '{pattern}' → {category} / {description}")
+                except ValueError:
+                    with db._connection:
+                        db._connection.execute(
+                            "UPDATE merchant_rules SET category = ?, description = ? WHERE pattern = ?",
+                            (category, description, pattern),
+                        )
+                    console.print(f"[green]✅ Regla actualizada:[/green] '{pattern}' → {category} / {description}")
 
     return "classify", (category, description)
 
@@ -298,37 +379,62 @@ def _print_summary(records: list[dict]) -> None:
     table = Table(title="Transactions to Import", show_lines=True)
     table.add_column("#", style="dim", width=3)
     table.add_column("Date", style="cyan")
+    table.add_column("Type", style="dim")
     table.add_column("Description", style="white")
-    table.add_column("Category", style="green")
-    table.add_column("Bs", justify="right")
+    table.add_column("Category", style="magenta")
+    table.add_column("Amount (Bs)", justify="right", style="yellow")
     table.add_column("Rate", justify="right", style="dim")
-    table.add_column("USD (exact)", justify="right", style="yellow")
-    table.add_column("Rounded $", justify="right", style="bold green")
+    table.add_column("USD Exact", justify="right", style="dim")
+    table.add_column("USD", justify="right", style="bold green")
+
+    total_bs = Decimal("0")
+    total_usd = 0
 
     for i, r in enumerate(records, 1):
+        tx = r["tx"]
         table.add_row(
             str(i),
-            str(r["date"]),
-            r["description"],
+            tx.date.strftime("%d/%m/%Y"),
+            tx.tx_type[:15],
+            r["description"][:30],
             r["category"],
-            f"{r['debit']:,.2f}",
-            f"{r['rate']}",
-            f"${r['usd_exact']:.2f}",
+            f"{tx.debit:,.2f}",
+            f"{r['rate']:.2f}",
+            f"${r['usd_exact']:.4f}",
             f"${r['usd_rounded']}",
         )
+        total_bs += tx.debit
+        total_usd += r["usd_rounded"]
 
+    table.add_section()
+    table.add_row(
+        "",
+        "TOTAL",
+        "",
+        f"{len(records)} transactions",
+        "",
+        f"Bs {total_bs:,.2f}",
+        "",
+        "",
+        f"${total_usd}",
+        style="bold",
+    )
     console.print(table)
-    total = sum(r["usd_rounded"] for r in records)
-    console.print(f"\n[bold]Total: {len(records)} transactions, ${total} USD[/bold]")
 
 
-def run(input_path: Path, dry_run: bool = False) -> None:
-    """Main import pipeline.
+# ---------------------------------------------------------------------------
+# Pipeline runner
+# ---------------------------------------------------------------------------
+
+def run(input_path: Path, dry_run: bool = False, headless: bool = True) -> None:
+    """Run the full import pipeline.
 
     Args:
         input_path: Path to the BNC .txt statement file.
         dry_run: If True, show summary without loading into the web app.
+        headless: If False, show the browser window during web automation.
     """
+    log_session_start(input_path, dry_run=dry_run)
     console.rule("[bold blue]🏦 BNC → Daily Expenses 4 Importer[/bold blue]")
 
     db = Database(_DB_PATH)
@@ -339,7 +445,66 @@ def run(input_path: Path, dry_run: bool = False) -> None:
     all_transactions = sorted(parse(content), key=lambda tx: (tx.date, tx.time))
     console.print(f"\n📄 Parsed [bold]{len(all_transactions)}[/bold] transactions from {input_path.name} (chronological order)")
 
-    # 2. Deduplicate
+    # 2. Check for previously failed transactions from this statement
+    failed_in_db = {r["reference"]: r for r in db.list_processed(status="failed")}
+    matching_failed = [tx for tx in all_transactions if _tx_key(tx) in failed_in_db]
+
+    if matching_failed:
+        console.print(
+            f"\n[bold yellow]⚠️ Se encontraron {len(matching_failed)} transacciones previamente clasificadas "
+            f"que fallaron al sincronizar con Daily Expenses 4.[/bold yellow]"
+        )
+        retry_choice = questionary.select(
+            "¿Qué deseas hacer con estas transacciones pendientes?",
+            choices=[
+                f"🚀 Sincronizar directamente las {len(matching_failed)} transacciones a Daily Expenses 4 (usar datos guardados)",
+                "📝 Revisar una a una en el flujo interactivo",
+                "🔄 Re-clasificar desde cero",
+                "⏭️  Omitir transacciones pendientes por ahora",
+            ],
+        ).ask()
+
+        if retry_choice and retry_choice.startswith("🚀"):
+            retry_records = []
+            for tx in matching_failed:
+                saved = failed_in_db[_tx_key(tx)]
+                retry_records.append({
+                    "tx": tx,
+                    "category": saved["category"],
+                    "description": saved["description"],
+                    "date": tx.date,
+                    "debit": tx.debit,
+                    "rate": Decimal("0"),
+                    "usd_exact": Decimal(str(saved["amount_usd"])),
+                    "usd_rounded": saved["amount_usd"],
+                })
+            console.print()
+            _print_summary(retry_records)
+            if not dry_run:
+                proceed = questionary.confirm(
+                    f"\n¿Cargar estas {len(retry_records)} transacciones en Daily Expenses 4 ahora?",
+                    default=True,
+                ).ask()
+                if proceed:
+                    from importer.web_automator import run_automation
+                    account = config["accounts"][0]["name"]
+                    results = run_automation(records=retry_records, account=account, config=config, headless=headless)
+                    synced_r = results.get("synced", [])
+                    failed_r = results.get("failed", [])
+                    zero_r = results.get("skipped_zero", [])
+                    for r in synced_r:
+                        db.mark_processed(_tx_key(r["tx"]), r["usd_rounded"], r["description"], r["category"], status="synced", overwrite=True)
+                    for r in failed_r:
+                        db.mark_processed(_tx_key(r["tx"]), r["usd_rounded"], r["description"], r["category"], status="failed", overwrite=True)
+                    for r in zero_r:
+                        db.mark_processed(_tx_key(r["tx"]), 0, r["description"], r["category"], status="skipped", overwrite=True)
+                    console.print(f"\n[bold green]✅ Reintento completado: {len(synced_r)} sincronizadas con éxito.[/bold green]")
+        elif retry_choice and retry_choice.startswith("🔄"):
+            with db._connection:
+                for tx in matching_failed:
+                    db._connection.execute("DELETE FROM processed_transactions WHERE reference = ?", (_tx_key(tx),))
+
+    # 3. Deduplicate
     new_transactions = [tx for tx in all_transactions if not db.is_processed(_tx_key(tx))]
     skipped = len(all_transactions) - len(new_transactions)
     if skipped:
@@ -347,14 +512,15 @@ def run(input_path: Path, dry_run: bool = False) -> None:
 
     if not new_transactions:
         console.print("[green]✅ Nothing new to import.[/green]")
+        log_session_end(total_parsed=len(all_transactions), synced_count=0, skipped_count=skipped, failed_count=0)
         return
 
-    # 3. Exchange rate (use first transaction date as default context date)
+    # 4. Exchange rate (use first transaction date as default context date)
     console.print()
     first_tx_date = new_transactions[0].date if new_transactions else None
     current_rate = _resolve_rate(db, initial_date=first_tx_date)
 
-    # 4. Interactive classification loop with suggestions, Undo/Back, and Exit options
+    # 5. Interactive classification loop with suggestions, Undo/Back, and Exit options
     categories = config.get("categories", DEFAULT_CATEGORIES)
     step_results: dict[int, dict | None] = {}  # idx -> classified dict or None (skipped)
     step_rates: dict[int, Decimal] = {}        # idx -> rate active at this step
@@ -366,8 +532,8 @@ def run(input_path: Path, dry_run: bool = False) -> None:
             step_rates[idx] = current_rate
             console.print(f"\n[dim]Transacción [{idx + 1}/{len(new_transactions)}][/dim]")
 
-            # Check if this is an incoming transfer / credit
-            if tx.credit > 0 or tx.tx_type in {"Credito Inmediato Recibido", "Crédito Inmediato Emitido"}:
+            # Check if this is an incoming transfer / credit (funding event)
+            if tx.credit > 0 or tx.tx_type == "Credito Inmediato Recibido":
                 prompt_action, new_rate = _handle_income_or_prompt_transaction(
                     tx, db, can_go_back=(idx > 0)
                 )
@@ -378,7 +544,7 @@ def run(input_path: Path, dry_run: bool = False) -> None:
                         current_rate = step_rates.get(idx, current_rate)
                     continue
                 if prompt_action == "exit":
-                    current_records = [v for v in step_results.values() if v is not None]
+                    current_records = [v for v in step_results.values() if v is not None and not v.get("skipped")]
                     exit_action = _handle_exit_flow(current_records)
                     if exit_action == "save_and_process":
                         break
@@ -390,19 +556,24 @@ def run(input_path: Path, dry_run: bool = False) -> None:
 
                 if prompt_action == "rate" and new_rate is not None:
                     current_rate = new_rate
+                    log_tx_decision(idx + 1, len(new_transactions), _tx_key(tx), "NEW_RATE", tx.description, amount_bs=f"+{tx.credit}", rate=str(current_rate))
+                else:
+                    log_tx_decision(idx + 1, len(new_transactions), _tx_key(tx), "INCOME_SKIPPED", tx.description, amount_bs=f"+{tx.credit}")
 
-                step_results[idx] = None  # Incomes are not recorded as expenses in app
+                step_results[idx] = {"skipped": True, "tx": tx}
                 idx += 1
                 continue
 
             # Check if rule exists in DB for suggestion
             suggested_rule = db.find_rule(tx.description)
+            saved_classification = failed_in_db.get(_tx_key(tx))
 
             action, data = _handle_transaction_classification(
                 tx,
                 rate=current_rate,
                 db=db,
                 suggested_rule=suggested_rule,
+                saved_classification=saved_classification,
                 can_go_back=(idx > 0),
                 categories=categories,
             )
@@ -415,7 +586,7 @@ def run(input_path: Path, dry_run: bool = False) -> None:
                 continue
 
             if action == "exit":
-                current_records = [v for v in step_results.values() if v is not None]
+                current_records = [v for v in step_results.values() if v is not None and not v.get("skipped")]
                 exit_action = _handle_exit_flow(current_records)
                 if exit_action == "save_and_process":
                     break
@@ -426,12 +597,14 @@ def run(input_path: Path, dry_run: bool = False) -> None:
                     return
 
             if action == "skip":
-                step_results[idx] = None
+                log_tx_decision(idx + 1, len(new_transactions), _tx_key(tx), "SKIPPED", tx.description, amount_bs=f"-{tx.debit}", rate=str(current_rate))
+                step_results[idx] = {"skipped": True, "tx": tx}
                 idx += 1
                 continue
 
             if action == "classify" and data:
                 cat, desc = data
+                log_tx_decision(idx + 1, len(new_transactions), _tx_key(tx), "CLASSIFIED", tx.description, cat=cat, app_desc=desc, amount_bs=f"-{tx.debit}", rate=str(current_rate))
                 step_results[idx] = {
                     "tx": tx,
                     "category": cat,
@@ -444,7 +617,7 @@ def run(input_path: Path, dry_run: bool = False) -> None:
 
             # If all transactions have been reviewed, offer final check / undo before proceeding
             if idx >= len(new_transactions):
-                valid_count = len([v for v in step_results.values() if v is not None])
+                valid_count = len([v for v in step_results.values() if v is not None and not v.get("skipped")])
                 console.print("\n" + "=" * 80)
                 console.print(f"🎉 [bold green]Se han revisado todos los movimientos ({valid_count} listos para importar)[/bold green]")
                 console.print("=" * 80)
@@ -472,14 +645,14 @@ def run(input_path: Path, dry_run: bool = False) -> None:
                     break
 
     except KeyboardInterrupt:
-        current_records = [v for v in step_results.values() if v is not None]
+        current_records = [v for v in step_results.values() if v is not None and not v.get("skipped")]
         exit_action = _handle_exit_flow(current_records)
         if exit_action != "save_and_process":
             console.print("\n[dim]Ejecución interrumpida. No se guardaron cambios.[/dim]")
             return
 
     # Compute USD conversion and rounding in chronological sequence
-    valid_steps = [v for v in step_results.values() if v is not None]
+    valid_steps = [v for v in step_results.values() if v is not None and not v.get("skipped")]
     if not valid_steps:
         console.print("[yellow]No transactions to import after classification.[/yellow]")
         return
@@ -508,6 +681,7 @@ def run(input_path: Path, dry_run: bool = False) -> None:
 
     if dry_run:
         console.print("\n[yellow]--dry-run mode: skipping web import.[/yellow]")
+        log_session_end(total_parsed=len(all_transactions), synced_count=0, skipped_count=len(all_transactions) - len(records), failed_count=0)
         return
 
     # 6. Confirm before web automation
@@ -524,21 +698,81 @@ def run(input_path: Path, dry_run: bool = False) -> None:
     from importer.web_automator import run_automation
 
     account = config["accounts"][0]["name"]
-    run_automation(records=records, account=account, config=config)
+    results = run_automation(records=records, account=account, config=config, headless=headless)
 
-    # 8. Mark as processed
-    for r in records:
+    # 8. Mark as processed in database with exact status
+    synced_records = results.get("synced", [])
+    failed_records = results.get("failed", [])
+    zero_records = results.get("skipped_zero", [])
+
+    for r in synced_records:
         try:
             db.mark_processed(
                 reference=_tx_key(r["tx"]),
                 amount_usd=r["usd_rounded"],
                 description=r["description"],
                 category=r["category"],
+                status="synced",
+                overwrite=True,
             )
-        except ValueError:
+        except Exception:
             pass
 
-    console.print(f"\n[bold green]✅ Import complete! {len(records)} transactions loaded.[/bold green]")
+    for r in failed_records:
+        try:
+            db.mark_processed(
+                reference=_tx_key(r["tx"]),
+                amount_usd=r["usd_rounded"],
+                description=r["description"],
+                category=r["category"],
+                status="failed",
+                overwrite=True,
+            )
+        except Exception:
+            pass
+
+    for r in zero_records:
+        try:
+            db.mark_processed(
+                reference=_tx_key(r["tx"]),
+                amount_usd=0,
+                description=r["description"],
+                category=r["category"],
+                status="skipped",
+                overwrite=True,
+            )
+        except Exception:
+            pass
+
+    # Mark user-skipped transactions in DB
+    for idx_k, res_val in step_results.items():
+        if res_val is None or (isinstance(res_val, dict) and res_val.get("skipped")):
+            skipped_tx = new_transactions[idx_k]
+            try:
+                db.mark_processed(
+                    reference=_tx_key(skipped_tx),
+                    amount_usd=0,
+                    description=skipped_tx.description[:40],
+                    category="",
+                    status="skipped",
+                    overwrite=True,
+                )
+            except Exception:
+                pass
+
+    skipped_total = len(zero_records) + sum(1 for v in step_results.values() if v is None or (isinstance(v, dict) and v.get("skipped")))
+    log_session_end(
+        total_parsed=len(all_transactions),
+        synced_count=len(synced_records),
+        skipped_count=skipped_total,
+        failed_count=len(failed_records),
+    )
+
+    if failed_records:
+        console.print(f"\n[bold yellow]⚠️ Importación finalizada: {len(synced_records)} sincronizados, {len(failed_records)} fallidos.[/bold yellow]")
+        console.print("[dim]Revisa el archivo de log en tmp/importer.log para ver los detalles de los errores.[/dim]")
+    else:
+        console.print(f"\n[bold green]✅ Import complete! {len(synced_records)} transactions loaded.[/bold green]")
 
 
 def main() -> None:
@@ -546,14 +780,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Import BNC bank statement transactions into Daily Expenses 4."
     )
-    parser.add_argument("--input", required=True, help="Path to the BNC .txt statement file.")
     parser.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Path to the BNC .txt statement file.",
+    )
+    parser.add_argument(
+        "-d",
         "--dry-run",
         action="store_true",
         help="Preview transactions without loading into the web app.",
     )
+    parser.add_argument(
+        "-v",
+        "--visible",
+        "--show-browser",
+        "--gui",
+        "--headed",
+        dest="visible",
+        action="store_true",
+        help="Open visible browser window to watch the automation in real-time.",
+    )
     args = parser.parse_args()
-    run(input_path=Path(args.input), dry_run=args.dry_run)
+    run(input_path=Path(args.input), dry_run=args.dry_run, headless=not args.visible)
 
 
 if __name__ == "__main__":

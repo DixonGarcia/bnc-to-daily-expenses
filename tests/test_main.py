@@ -10,6 +10,7 @@ from importer.main import (
     DEFAULT_CATEGORIES,
     _format_date,
     _tx_key,
+    extract_rule_pattern,
 )
 from importer.parser import BNCTransaction
 from importer.rounder import AccumulativeRounder
@@ -109,3 +110,33 @@ class TestChronologicalSortingAndDynamicRate:
 
         assert usd1 == 10
         assert usd2 == 10
+
+
+class TestExtractRulePattern:
+
+    class WhenGivenTransferDescription:
+        def test_extracts_name_after_a_favor_de(self):
+            raw = "TRANSFERENCIA A FAVOR DE: DENIM CONCEPT CA"
+            assert extract_rule_pattern(raw) == "DENIM CONCEPT CA"
+
+        def test_extracts_name_case_insensitive(self):
+            raw = "transferencia a favor de: INVERSIONES EL TREBOL"
+            assert extract_rule_pattern(raw) == "INVERSIONES EL TREBOL"
+
+        def test_extracts_name_after_a_nombre_de(self):
+            raw = "TRANSFERENCIA RECIBIDA A NOMBRE DE: JESUS DANIEL MENDOZA"
+            assert extract_rule_pattern(raw) == "JESUS DANIEL MENDOZA"
+
+    class WhenGivenPagoMovilDescription:
+        def test_strips_phone_id_and_bank_prefixes(self):
+            raw = "TELF.:584145972096 CED.:008673311 BANCO:0105 Manutención NERSI DIAZ"
+            assert extract_rule_pattern(raw) == "Manutención NERSI DIAZ"
+
+        def test_strips_pago_movil_with_account_prefix(self):
+            raw = "TELF.:000000000000 CED.:J310233390 CTA.:01340070980701029151 Caracas Rock"
+            assert extract_rule_pattern(raw) == "Caracas Rock"
+
+    class WhenGivenStandardPosDescription:
+        def test_strips_ven_zona_and_terminal_noise(self):
+            raw = "LIVAL2023, C.A.        MIRANDA       VEN ZONA= BANCO:010375       TERMINAL:00620144 COMER:J0503976160001"
+            assert extract_rule_pattern(raw).startswith("LIVAL2023, C.A")

@@ -85,7 +85,8 @@ class Database:
                     processed_at TEXT NOT NULL,
                     amount_usd   INTEGER NOT NULL,
                     description  TEXT NOT NULL,
-                    category     TEXT NOT NULL DEFAULT ''
+                    category     TEXT NOT NULL DEFAULT '',
+                    status       TEXT NOT NULL DEFAULT 'synced'
                 );
 
                 CREATE TABLE IF NOT EXISTS exchange_rates (
@@ -98,6 +99,12 @@ class Database:
             try:
                 self._connection.execute(
                     "ALTER TABLE processed_transactions ADD COLUMN category TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._connection.execute(
+                    "ALTER TABLE processed_transactions ADD COLUMN status TEXT NOT NULL DEFAULT 'synced'"
                 )
             except sqlite3.OperationalError:
                 pass
@@ -199,19 +206,21 @@ class Database:
     # ------------------------------------------------------------------
 
     def is_processed(self, reference: str) -> bool:
-        """Check whether a transaction reference was already imported.
+        """Check whether a transaction reference was already imported or skipped.
 
         Args:
             reference: The BNC "Referencia" field value.
 
         Returns:
-            True if the reference exists in processed_transactions.
+            True if the reference exists and is 'synced' or 'skipped'.
         """
         row = self._connection.execute(
-            "SELECT 1 FROM processed_transactions WHERE reference = ?",
+            "SELECT status FROM processed_transactions WHERE reference = ?",
             (reference,),
         ).fetchone()
-        return row is not None
+        if row is None:
+            return False
+        return row["status"] in {"synced", "skipped"}
 
     def mark_processed(
         self,
@@ -219,29 +228,74 @@ class Database:
         amount_usd: int,
         description: str,
         category: str = "",
+        status: str = "synced",
+        overwrite: bool = False,
     ) -> None:
-        """Record a transaction as successfully imported.
+        """Record a transaction as processed with status.
 
         Args:
             reference: The BNC "Referencia" field value.
-            amount_usd: Rounded whole-dollar amount that was loaded.
+            amount_usd: Rounded whole-dollar amount that was loaded (or 0 if skipped).
             description: Description as recorded in Daily Expenses 4.
             category: Category as recorded in Daily Expenses 4.
+            status: 'synced', 'skipped', or 'failed'.
+            overwrite: Whether to overwrite existing record if already processed.
 
         Raises:
-            ValueError: If the reference was already marked as processed.
+            ValueError: If the reference was already marked as processed and overwrite is False.
         """
-        if self.is_processed(reference):
+        exists = self._connection.execute(
+            "SELECT 1 FROM processed_transactions WHERE reference = ?", (reference,)
+        ).fetchone() is not None
+
+        if exists and not overwrite:
             raise ValueError(f"Transaction '{reference}' was already processed.")
 
         now = datetime.now(timezone.utc).isoformat()
         with self._connection:
+            if exists:
+                self._connection.execute(
+                    "UPDATE processed_transactions SET "
+                    "processed_at = ?, amount_usd = ?, description = ?, category = ?, status = ? "
+                    "WHERE reference = ?",
+                    (now, amount_usd, description, category, status, reference),
+                )
+            else:
+                self._connection.execute(
+                    "INSERT INTO processed_transactions "
+                    "(reference, processed_at, amount_usd, description, category, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (reference, now, amount_usd, description, category, status),
+                )
+
+    def get_transaction_status(self, reference: str) -> str | None:
+        """Return the status ('synced', 'skipped', 'failed') of a transaction, or None."""
+        row = self._connection.execute(
+            "SELECT status FROM processed_transactions WHERE reference = ?",
+            (reference,),
+        ).fetchone()
+        return row["status"] if row else None
+
+    def update_status(self, reference: str, status: str) -> None:
+        """Update the status of an existing processed transaction."""
+        with self._connection:
             self._connection.execute(
-                "INSERT INTO processed_transactions "
-                "(reference, processed_at, amount_usd, description, category) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (reference, now, amount_usd, description, category),
+                "UPDATE processed_transactions SET status = ? WHERE reference = ?",
+                (status, reference),
             )
+
+    def list_processed(self, status: str | None = None) -> list[dict]:
+        """List processed transactions, optionally filtered by status."""
+        if status:
+            rows = self._connection.execute(
+                "SELECT * FROM processed_transactions WHERE status = ? ORDER BY rowid ASC",
+                (status,),
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                "SELECT * FROM processed_transactions ORDER BY rowid ASC"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Exchange Rates

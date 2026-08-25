@@ -109,14 +109,33 @@ class TestClassify:
             assert result.requires_prompt is True
 
         def test_credito_inmediato_recibido_has_empty_category(self, db):
-            tx = make_tx("Credito Inmediato Recibido")
+            tx = BNCTransaction(
+                date=date(2026, 8, 19),
+                time="12:00:00",
+                reference="123456",
+                tx_type="Credito Inmediato Recibido",
+                op_type="",
+                description="ABONO DE NOMINA",
+                debit=Decimal("0"),
+                credit=Decimal("50000"),
+                balance=Decimal("50000"),
+            )
             result = classify(tx, db)
             assert result.category == ""
 
-        def test_credito_inmediato_emitido_requires_prompt(self, db):
-            tx = make_tx("Crédito Inmediato Emitido")
+        def test_credito_inmediato_emitido_with_rule_is_classified_as_expense(self, db):
+            db.add_rule("Caracas Rock", "Diversión", "Caracas Rock")
+            tx = make_tx("Crédito Inmediato Emitido", "TELF.:000000000000 CED.:J310233390 CTA.:01340070980701029151 Caracas Rock", debit="34764.48")
             result = classify(tx, db)
-            assert result.requires_prompt is True
+            assert isinstance(result, ClassifiedTransaction)
+            assert result.category == "Diversión"
+            assert result.description == "Caracas Rock"
+            assert result.requires_prompt is False
+
+        def test_credito_inmediato_emitido_without_rule_returns_none(self, db):
+            tx = make_tx("Crédito Inmediato Emitido", "TELF.:000000000000 CED.:J310233390 CTA.:01340070980701029151 Caracas Rock", debit="34764.48")
+            result = classify(tx, db)
+            assert result is None
 
         def test_prompt_tx_original_tx_is_preserved(self, db):
             tx = make_tx("Credito Inmediato Recibido")

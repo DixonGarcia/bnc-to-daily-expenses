@@ -123,8 +123,41 @@ class TestProcessedTransactions:
             ).fetchone()
             assert row["category"] == "Comida"
 
-        def test_raises_on_duplicate_reference(self, db):
+        def test_stores_status_default_synced(self, db):
+            db.mark_processed("819155311", amount_usd=10, description="Charcutería", category="Comida")
+            assert db.get_transaction_status("819155311") == "synced"
+
+        def test_stores_status_skipped(self, db):
+            db.mark_processed("819155312", amount_usd=0, description="Unknown", category="", status="skipped")
+            assert db.get_transaction_status("819155312") == "skipped"
+            assert db.is_processed("819155312") is True
+
+        def test_stores_status_failed(self, db):
+            db.mark_processed("819155313", amount_usd=15, description="Failed Tx", category="Comida", status="failed")
+            assert db.get_transaction_status("819155313") == "failed"
+
+        def test_update_status_modifies_existing_status(self, db):
+            db.mark_processed("819155314", amount_usd=20, description="Pending", status="failed")
+            assert db.get_transaction_status("819155314") == "failed"
+            db.update_status("819155314", "synced")
+            assert db.get_transaction_status("819155314") == "synced"
+
+        def test_list_processed_filtered_by_status(self, db):
+            db.mark_processed("ref1", 10, "Desc 1", status="synced")
+            db.mark_processed("ref2", 0, "Desc 2", status="skipped")
+            db.mark_processed("ref3", 20, "Desc 3", status="failed")
+
+            synced = db.list_processed(status="synced")
+            assert len(synced) == 1
+            assert synced[0]["reference"] == "ref1"
+
+            skipped = db.list_processed(status="skipped")
+            assert len(skipped) == 1
+            assert skipped[0]["reference"] == "ref2"
+
+        def test_raises_on_duplicate_reference_unless_upsert(self, db):
             db.mark_processed("819155311", amount_usd=10, description="Charcutería")
+            # Calling mark_processed with overwrite=True or update should update, while standard call raises
             with pytest.raises(ValueError, match="already processed"):
                 db.mark_processed("819155311", amount_usd=10, description="Charcutería")
 

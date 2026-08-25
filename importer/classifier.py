@@ -19,7 +19,6 @@ _EXPENSE_TYPES = {
 
 _PROMPT_TYPES = {
     "Credito Inmediato Recibido",
-    "Crédito Inmediato Emitido",
 }
 
 
