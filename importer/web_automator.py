@@ -4,8 +4,8 @@ Uses Playwright to simulate user interaction with the Angular SPA at
 https://dailyexpenses4.com.
 
 Angular Components:
-  - Account picker:  <app-selector-account>
-  - Category picker: <app-selector-category>
+  - Account picker:  <app-modal-edit-account-selector> (legacy <app-selector-account>)
+  - Category picker: <app-modal-category-selector> (legacy <app-selector-category>)
   - Date & Time picker: <app-date-time-picker> (mat-calendar + ngb-timepicker)
   - Save button:     button.save-movement-button
 """
@@ -241,6 +241,108 @@ def _set_date_and_time(modal, expense_date: date, expense_time: str = "") -> Non
 
 
 # ---------------------------------------------------------------------------
+# Account & Category Selector Helpers
+# ---------------------------------------------------------------------------
+
+def _select_account(modal, account: str) -> None:
+    """Select the specified account in the Add Movement modal.
+
+    Supports both the new <app-modal-edit-account-selector> sub-modal
+    and legacy <app-selector-account> dropdown.
+    """
+    legacy = modal.locator("app-selector-account button")
+    if legacy.count() > 0:
+        legacy.first.click()
+        modal.page.wait_for_timeout(250)
+        account_item = modal.locator(
+            "app-selector-account .dropdown-menu .item-list"
+        ).filter(has_text=account).first
+        if account_item.count() > 0:
+            account_item.click()
+        else:
+            modal.get_by_text(account, exact=True).first.click()
+        modal.page.wait_for_timeout(250)
+    else:
+        acc_trigger = modal.locator(
+            "button[data-bs-target='#app-modal-edit-account-selector']"
+        ).or_(modal.locator("button.movement-picker").first).first
+        acc_trigger.click()
+        modal.page.wait_for_timeout(400)
+
+        acc_modal = modal.page.locator("#app-modal-edit-account-selector")
+        acc_modal.wait_for(state="visible", timeout=6_000)
+
+        item = acc_modal.locator("button.account-row").filter(
+            has_text=re.compile(rf"\b{re.escape(account)}\b", re.IGNORECASE)
+        ).first
+        if item.count() == 0:
+            item = acc_modal.locator(".account-name").filter(
+                has_text=re.compile(rf"^\s*{re.escape(account)}\s*$", re.IGNORECASE)
+            ).first
+
+        if item.count() > 0:
+            item.click()
+        else:
+            acc_modal.get_by_text(account, exact=False).first.click()
+
+        modal.page.wait_for_timeout(350)
+        if acc_modal.is_visible():
+            close_btn = acc_modal.locator(".modal-close, [aria-label='Close']").first
+            if close_btn.count() > 0:
+                close_btn.click()
+                modal.page.wait_for_timeout(250)
+
+
+def _select_category(modal, category: str) -> None:
+    """Select the specified category in the Add Movement modal.
+
+    Supports both the new <app-modal-category-selector> sub-modal
+    and legacy <app-selector-category> dropdown.
+    """
+    legacy = modal.locator("app-selector-category button")
+    if legacy.count() > 0:
+        legacy.first.click()
+        modal.page.wait_for_timeout(250)
+        category_item = modal.locator(
+            "app-selector-category .dropdown-menu .item-list"
+        ).filter(has_text=category).first
+        if category_item.count() > 0:
+            category_item.click()
+        else:
+            modal.get_by_text(category, exact=True).first.click()
+        modal.page.wait_for_timeout(250)
+    else:
+        cat_trigger = modal.locator(
+            "button[data-bs-target='#movement-category-selector']"
+        ).or_(modal.locator("button.movement-picker").nth(1)).first
+        cat_trigger.click()
+        modal.page.wait_for_timeout(400)
+
+        cat_modal = modal.page.locator("#movement-category-selector")
+        cat_modal.wait_for(state="visible", timeout=6_000)
+
+        item = cat_modal.locator("button.account-row").filter(
+            has_text=re.compile(rf"^\s*{re.escape(category)}\b", re.IGNORECASE)
+        ).first
+        if item.count() == 0:
+            item = cat_modal.locator(".account-name").filter(
+                has_text=re.compile(rf"^\s*{re.escape(category)}\s*$", re.IGNORECASE)
+            ).first
+
+        if item.count() > 0:
+            item.click()
+        else:
+            cat_modal.get_by_text(category, exact=False).first.click()
+
+        modal.page.wait_for_timeout(350)
+        if cat_modal.is_visible():
+            close_btn = cat_modal.locator(".modal-close, [aria-label='Close']").first
+            if close_btn.count() > 0:
+                close_btn.click()
+                modal.page.wait_for_timeout(250)
+
+
+# ---------------------------------------------------------------------------
 # Expense loading — one expense per call
 # ---------------------------------------------------------------------------
 
@@ -260,7 +362,9 @@ def load_expense(
     # 1. If modal is stuck open from previous error, close it first
     if modal.is_visible():
         try:
-            close_btn = modal.locator("button.btn-close, [aria-label='Close'], button").filter(has_text=re.compile(r"Cancelar|Cancel|Close", re.IGNORECASE))
+            close_btn = modal.locator(
+                "#closeButtonMovement, button.modal-close, button.btn-close, [aria-label='Close'], button"
+            ).filter(has_text=re.compile(r"Cancelar|Cancel|Close|^$", re.IGNORECASE))
             if close_btn.count() > 0:
                 close_btn.first.click()
                 page.wait_for_timeout(300)
@@ -277,7 +381,7 @@ def load_expense(
                 page.wait_for_timeout(500)
 
         fab_btn = page.locator(
-            "button.btn-circle-lg, button.btn-floating, button.floating-action-button, button.btn-primary:has(img[src*='icon-add']), button:has(i.bi-plus)"
+            "button[aria-label='Add'], button.btn-circle-lg, button.btn-circle, button.btn-floating, button.floating-action-button, button.btn-primary:has(img[src*='icon-add']), button:has(i.bi-plus)"
         ).or_(page.get_by_role("button").filter(has_text=re.compile(r"^\s*$")))
 
         if fab_btn.count() > 0:
@@ -291,33 +395,19 @@ def load_expense(
             modal.wait_for(state="visible", timeout=8_000)
 
     # 3. Amount input
-    amount_field = modal.locator("input.quantity, input[type='number'], input").first
+    amount_field = modal.locator("#movement-amount, input.quantity, input[type='number'], input").first
     amount_field.wait_for(state="visible", timeout=8_000)
     amount_field.click()
     amount_field.fill(str(amount_usd))
 
-    # 4. Account selector via <app-selector-account>
-    modal.locator("app-selector-account button").click()
-    page.wait_for_timeout(250)
-    account_item = modal.locator("app-selector-account .dropdown-menu .item-list").filter(has_text=account).first
-    if account_item.count() > 0:
-        account_item.click()
-    else:
-        modal.get_by_text(account, exact=True).first.click()
-    page.wait_for_timeout(250)
+    # 4. Account selector
+    _select_account(modal, account)
 
-    # 5. Category selector via <app-selector-category>
-    modal.locator("app-selector-category button").click()
-    page.wait_for_timeout(250)
-    category_item = modal.locator("app-selector-category .dropdown-menu .item-list").filter(has_text=category).first
-    if category_item.count() > 0:
-        category_item.click()
-    else:
-        modal.get_by_text(category, exact=True).first.click()
-    page.wait_for_timeout(250)
+    # 5. Category selector
+    _select_category(modal, category)
 
     # 6. Description
-    modal.locator("textarea").fill(description)
+    modal.locator("#movement-description, textarea").first.fill(description)
 
     # 7. Date & Time picker via <app-date-time-picker>
     _set_date_and_time(modal, expense_date=expense_date, expense_time=expense_time)
